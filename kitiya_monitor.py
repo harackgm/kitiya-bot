@@ -21,42 +21,43 @@ def send_line_flex_carousel(items):
     for item in items[:10]:  # 最新10件を取得
         bubble = {
             "type": "bubble",
-            "size": "micro",
+            "size": "mega",  # micro から mega に拡大して大きく表示
             "body": {
                 "type": "box",
                 "layout": "vertical",
                 "contents": [
                     {
                         "type": "text",
-                        "text": "現在の掲載商品",
+                        "text": "【吉や】現在掲載中の商品",
                         "weight": "bold",
                         "color": "#1DB446",
-                        "size": "xs",
+                        "size": "sm",
                     },
                     {
                         "type": "text",
                         "text": item["title"],
                         "weight": "bold",
-                        "size": "sm",
+                        "size": "md",
                         "wrap": True,
-                        "margin": "xs",
+                        "margin": "md",
                     },
                 ],
             },
             "footer": {
                 "type": "box",
                 "layout": "vertical",
+                "spacing": "sm",
                 "contents": [
                     {
                         "type": "button",
                         "action": {
                             "type": "uri",
-                            "label": "商品ページヘ",
+                            "label": "吉やHPで確認する",
                             "uri": TARGET_URL,
                         },
                         "style": "primary",
                         "color": "#00B900",
-                        "size": "sm",
+                        "size": "md",
                     }
                 ],
             },
@@ -104,8 +105,8 @@ def main():
         page = context.new_page()
 
         try:
-            page.goto(TARGET_URL, wait_until="networkidle", timeout=30000)
-            time.sleep(2)
+            page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(3)
             html = page.content()
         except Exception as e:
             print(f"アクセスエラーが発生しました: {e}")
@@ -117,7 +118,6 @@ def main():
     soup = BeautifulSoup(html, "html.parser")
     current_items = []
 
-    # HP上で現在掲載されている商品要素を取得
     for element in soup.find_all(
         ["div", "td", "p", "li"], string=lambda t: t and "円" in t
     ):
@@ -125,13 +125,11 @@ def main():
         full_text = parent.get_text(separator=" ", strip=True)
 
         if len(full_text) < 150 and "カート" not in full_text:
-            # 重複を防ぎつつ追加
             if not any(item["title"] == full_text for item in current_items):
                 current_items.append({"title": full_text})
 
     print(f"現在HPから {len(current_items)} 件を取得しました。")
 
-    # 上から順（現在あるものの中での最新10件）をカルーセル送信
     if current_items:
         send_line_flex_carousel(current_items[:10])
     else:

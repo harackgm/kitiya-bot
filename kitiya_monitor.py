@@ -1,60 +1,95 @@
 import os
-import sqlite3
-import time
 import requests
+import time
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 # --- 設定情報 ---
 TARGET_URL = "https://www.kitiya.jp/"
 
-# GitHub Secretsから安全に取得（無ければ空文字）
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
 
-def send_line_notify(message):
-    """LINE Messaging APIを使ってメッセージを送信"""
+def send_line_flex_carousel(items):
+    """LINE Messaging APIを使ってカルーセル（Flex Message）を送信"""
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
         print("LINEの設定情報（トークン/ID）が見つかりません。")
         return
+
+    bubbles = []
+    for item in items[:10]:  # 最新10件を取得
+        bubble = {
+            "type": "bubble",
+            "size": "micro",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "現在の掲載商品",
+                        "weight": "bold",
+                        "color": "#1DB446",
+                        "size": "xs",
+                    },
+                    {
+                        "type": "text",
+                        "text": item["title"],
+                        "weight": "bold",
+                        "size": "sm",
+                        "wrap": True,
+                        "margin": "xs",
+                    },
+                ],
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "uri",
+                            "label": "商品ページヘ",
+                            "uri": TARGET_URL,
+                        },
+                        "style": "primary",
+                        "color": "#00B900",
+                        "size": "sm",
+                    }
+                ],
+            },
+        }
+        bubbles.append(bubble)
+
+    payload = {
+        "to": LINE_USER_ID,
+        "messages": [
+            {
+                "type": "flex",
+                "altText": "【吉や】現在掲載されている最新10件",
+                "contents": {"type": "carousel", "contents": bubbles},
+            }
+        ],
+    }
 
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
     }
-    payload = {
-        "to": LINE_USER_ID,
-        "messages": [{"type": "text", "text": message}],
-    }
+
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=10)
         res.raise_for_status()
-        print("LINEへの通知に成功しました。")
+        print("LINEへのカルーセル送信に成功しました。")
     except Exception as e:
         print(f"LINE通知エラー: {e}")
 
 
-def init_db():
-    conn = sqlite3.connect("kitiya_products.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT UNIQUE,
-            price TEXT,
-            status TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
-def monitor_kitiya():
-    init_db()
-    print("ブラウザを起動して吉やHPをチェック中...")
+def main():
+    print("ブラウザを起動して吉やHPへアクセス中...")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -80,11 +115,9 @@ def monitor_kitiya():
         browser.close()
 
     soup = BeautifulSoup(html, "html.parser")
-    conn = sqlite3.connect("kitiya_products.db")
-    cursor = conn.cursor()
+    current_items = []
 
-    new_items = []
-
+    # HP上で現在掲載されている商品要素を取得
     for element in soup.find_all(
         ["div", "td", "p", "li"], string=lambda t: t and "円" in t
     ):
@@ -92,34 +125,18 @@ def monitor_kitiya():
         full_text = parent.get_text(separator=" ", strip=True)
 
         if len(full_text) < 150 and "カート" not in full_text:
-            try:
-                cursor.execute(
-                    """
-                    INSERT INTO products (title, price, status)
-                    VALUES (?, ?, ?)
-                """,
-                    (full_text, "価格込み", "入荷情報"),
-                )
-                new_items.append(full_text)
-            except sqlite3.IntegrityError:
-                pass
+            # 重複を防ぎつつ追加
+            if not any(item["title"] == full_text for item in current_items):
+                current_items.append({"title": full_text})
 
-    conn.commit()
-    conn.close()
+    print(f"現在HPから {len(current_items)} 件を取得しました。")
 
-    if new_items:
-        message = (
-            f"【吉や 新着・再入荷通知】\n{len(new_items)}件の新しい更新があります！\n\n"
-        )
-        for item in new_items[:5]:
-            message += f"・{item}\n"
-        message += f"\n▼HPで確認\n{TARGET_URL}"
-
-        send_line_notify(message)
-        print(f"差分検知: {len(new_items)} 件の新着を通知しました。")
+    # 上から順（現在あるものの中での最新10件）をカルーセル送信
+    if current_items:
+        send_line_flex_carousel(current_items[:10])
     else:
-        print("新規の更新（差分）はありませんでした。")
+        print("表示できる商品要素が見つかりませんでした。")
 
 
 if __name__ == "__main__":
-    monitor_kitiya()
+    main()

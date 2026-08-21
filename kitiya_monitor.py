@@ -20,7 +20,6 @@ def clean_image_url(img_tag, base_url):
     """遅延読み込み(Lazy Load)に対応して正しい画像URLを取得"""
     if not img_tag:
         return ""
-    # data-src, data-original, src の順で探索
     src = img_tag.get("data-src") or img_tag.get("data-original") or img_tag.get("src") or ""
     if not src or "blank.gif" in src or "spacer.gif" in src or "transparent" in src:
         return ""
@@ -29,6 +28,42 @@ def clean_image_url(img_tag, base_url):
     if full_url.startswith("http://"):
         full_url = full_url.replace("http://", "https://", 1)
     return full_url
+
+def extract_blog_item(article, base_url):
+    """記事要素から個別記事のURL(/archives/XXXX)・タイトル・画像を取得"""
+    # archives/ や数字のみの個別パーマリンクを優先取得
+    a_tag = article.find("a", href=lambda h: h and ("archives" in h or re.search(r'/\d+/?$', h)))
+    if not a_tag:
+        # トップページ以外のリンクを探す
+        for a in article.select("h1 a, h2 a, h3 a, .entry-title a, a"):
+            href = a.get("href", "")
+            if href and urljoin(base_url, href).rstrip('/') != base_url.rstrip('/'):
+                a_tag = a
+                break
+
+    if not a_tag or not a_tag.get("href"):
+        return None
+
+    url = urljoin(base_url, a_tag["href"])
+    if url.rstrip('/') == base_url.rstrip('/'):
+        return None
+
+    title = a_tag.get_text(strip=True)
+    if not title:
+        title_elem = article.select_one("h1, h2, h3, .entry-title")
+        if title_elem:
+            title = title_elem.get_text(strip=True)
+
+    img_tag = article.select_one("img")
+    img_url = clean_image_url(img_tag, base_url)
+
+    return {
+        "title": title or "ブログ更新のお知らせ",
+        "url": url,
+        "img_url": img_url,
+        "category": "blog",
+        "status_type": "new"
+    }
 
 # --- データベース処理 ---
 def init_db():
@@ -59,7 +94,7 @@ def is_initial_run():
 
 # --- スクレイピング処理 ---
 def check_blog_updates(initial_run=False):
-    """ブログの更新チェック（最新個別記事URLと画像を正確に取得）"""
+    """ブログの更新チェック（archives/等の個別記事URLを正しく取得）"""
     new_items = []
     try:
         response = requests.get(BLOG_URL, timeout=10)
@@ -70,25 +105,19 @@ def check_blog_updates(initial_run=False):
         cursor = conn.cursor()
 
         articles = soup.select("article, .post, .entry, .post-list-item")
-        for article in articles[:5]:
-            title_tag = article.select_one("h1 a, h2 a, .entry-title a, a")
-            if not title_tag or not title_tag.get("href"):
+        for article in articles[:10]:
+            blog_item = extract_blog_item(article, BLOG_URL)
+            if not blog_item:
                 continue
 
-            title = title_tag.get_text(strip=True)
-            url = urljoin(BLOG_URL, title_tag["href"])
-            
-            img_tag = article.select_one("img")
-            img_url = clean_image_url(img_tag, BLOG_URL)
+            url = blog_item["url"]
+            title = blog_item["title"]
 
             cursor.execute("SELECT url FROM blog_posts WHERE url = ?", (url,))
             if not cursor.fetchone():
                 cursor.execute("INSERT INTO blog_posts (url, title) VALUES (?, ?)", (url, title))
                 if not initial_run:
-                    new_items.append({
-                        "title": title, "url": url, "img_url": img_url,
-                        "category": "blog", "status_type": "new"
-                    })
+                    new_items.append(blog_item)
 
         conn.commit()
         conn.close()
@@ -137,7 +166,6 @@ def check_product_updates(initial_run=False):
                     if not a_tag or not a_tag.get("href"):
                         continue
 
-                    # ?pid=XXXX 形式の正確な個別商品URLを取得
                     item_url = urljoin(url, a_tag["href"])
 
                     if item_url not in all_seen_urls:
@@ -231,7 +259,6 @@ def send_line_carousel(items):
 
             bubble = {"type": "bubble", "size": "kilo"}
             
-            # 画像が存在する場合のみ hero セクションを追加
             if item.get("img_url"):
                 bubble["hero"] = {
                     "type": "image", "url": item["img_url"], "size": "full",
@@ -278,25 +305,26 @@ def run_live_test():
     """実サイトからデータを取得し、見た目と直リンクテスト用にLINE送信"""
     print("📱 実際のサイトからテスト通知用データを取得中...")
     
-    # ブログから最新1件を取得
+    # ブログから最新個別記事を取得
     blog_res = requests.get(BLOG_URL, timeout=10)
     blog_soup = BeautifulSoup(blog_res.text, "html.parser")
-    article = blog_soup.select_one("article, .post, .entry, .post-list-item")
+    articles = blog_soup.select("article, .post, .entry, .post-list-item")
     
-    blog_item = {
-        "title": "【テスト通知】ブログ最新記事",
-        "url": BLOG_URL,
-        "img_url": "",
-        "category": "blog",
-        "status_type": "new"
-    }
-    if article:
-        a_tag = article.select_one("h1 a, h2 a, .entry-title a, a")
-        if a_tag and a_tag.get("href"):
-            blog_item["title"] = a_tag.get_text(strip=True)
-            blog_item["url"] = urljoin(BLOG_URL, a_tag["href"])
-        img_tag = article.select_one("img")
-        blog_item["img_url"] = clean_image_url(img_tag, BLOG_URL)
+    blog_item = None
+    for article in articles:
+        extracted = extract_blog_item(article, BLOG_URL)
+        if extracted:
+            blog_item = extracted
+            break
+
+    if not blog_item:
+        blog_item = {
+            "title": "【テスト通知】ブログ最新記事",
+            "url": "https://www.kitiya.jp/apps/note/archives/23614",
+            "img_url": "",
+            "category": "blog",
+            "status_type": "new"
+        }
 
     # 商品1ページ目から最新2件を取得
     test_products = []
@@ -336,7 +364,6 @@ def run_live_test():
                     break
         browser.close()
 
-    # ブログ1件＋新入荷1件＋再入荷1件をまとめてLINEへ送る
     test_items = [blog_item] + test_products
     print(f"📢 以下の {len(test_items)} 件のテストカードをLINEへ送信します:")
     for item in test_items:
@@ -346,7 +373,6 @@ def run_live_test():
 
 # --- 実行エントリーポイント ---
 def main():
-    # 引数に --test が渡された場合はテスト送信を実行
     if len(sys.argv) > 1 and sys.argv[1] == "--test":
         run_live_test()
         return

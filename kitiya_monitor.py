@@ -6,7 +6,7 @@ from urllib.parse import urljoin
 from playwright.sync_api import sync_playwright
 
 # --- 設定情報 ---
-TARGET_URL = "https://www.kitiya.jp/"
+TARGET_URL = "https://www.kitiya.jp/apps/note/"
 
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
@@ -43,7 +43,7 @@ def send_line_text(message):
 
 
 def main():
-    print("ブラウザを起動して吉やHPへアクセス中...")
+    print("ブラウザを起動して吉や入荷ブログ一覧へアクセス中...")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -67,30 +67,30 @@ def main():
     soup = BeautifulSoup(html, "html.parser")
     current_items = []
 
-    # 入荷情報ブログ（/apps/note/archives/...）のリンク要素を抽出
+    # 入荷ブログ記事のリンク（/apps/note/archives/数字）を抽出
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
-        if "/apps/note/archives/" in href:
+        
+        # /archives/数字 の形式になっている記事詳細リンクを抽出
+        if "/apps/note/archives/" in href and not "/tag/" in href:
             full_url = urljoin(TARGET_URL, href)
             
-            # ホバー時や画像内のテキスト・alt情報を取得
+            # テキスト情報を取得
             text = a_tag.get_text(separator=" ", strip=True)
-            img = a_tag.find("img")
-            img_alt = img.get("alt", "") if img else ""
             
-            # テキストまたはalt属性からタイトルを抽出
-            title = text if text else img_alt
-            if not title:
-                title = "最新入荷情報"
+            # テキストが空の場合は親要素からテキストを取得
+            if not text or len(text) < 5:
+                parent_text = a_tag.parent.get_text(separator=" ", strip=True)
+                text = parent_text if parent_text else "最新入荷情報"
 
-            # 重複チェック（同じ記事URLは1つにまとめる）
+            # 重複防止（同じ記事URLは1回だけ登録）
             if not any(item["url"] == full_url for item in current_items):
                 current_items.append({
-                    "title": title,
+                    "title": text,
                     "url": full_url
                 })
 
-    print(f"入荷情報を {len(current_items)} 件取得しました。")
+    print(f"ブログ一覧から {len(current_items)} 件の記事を取得しました。")
 
     if current_items:
         msg = "【吉や】最新の入荷情報（上位3件）\n"

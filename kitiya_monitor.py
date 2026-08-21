@@ -9,7 +9,8 @@ from playwright.sync_api import sync_playwright
 
 # --- 設定情報 ---
 BLOG_URL = "https://www.kitiya.jp/apps/note/"
-TROUT_CAT_URL = "https://www.kitiya.jp/?mode=cate&cbid=2590067&csid=0&sort=n"
+# トラウトグループのベースURL
+TROUT_BASE_URL = "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n"
 
 DB_FILE = "kitiya_data.db"
 
@@ -205,11 +206,12 @@ def scrape_blog(page):
 
 
 def parse_page_products(soup):
-    """HTMLから商品情報を抽出する共通関数"""
+    """HTMLから商品情報を抽出する関数"""
     items = []
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
-        if href in ["#", "/"] or "javascript:" in href or "mode=cate" in href or "mode=sk" in href or "apps/note" in href:
+        # 無効なリンクやナビゲーション系を除外
+        if href in ["#", "/"] or "javascript:" in href or "mode=grp" in href or "mode=cate" in href or "mode=sk" in href or "apps/note" in href:
             continue
 
         full_url = urljoin("https://www.kitiya.jp/", href)
@@ -258,50 +260,34 @@ def parse_page_products(soup):
 
 
 def scrape_products_all_pages(page):
-    """次へリンクを連続追跡して全ページ巡回"""
+    """page=1, page=2... と順番に連番アクセスして全ページ巡回"""
     all_items = []
-    current_url = TROUT_CAT_URL
     page_num = 1
     
-    print("商品全ページの巡回を開始します...")
+    print("商品全ページの順次アクセスを開始します...")
 
-    while current_url and page_num <= 50:  # 無限ループ防止のため上限50ページ設定
-        print(f"商品一覧 {page_num} ページ目を処理中: {current_url}")
+    while page_num <= 100:  # 安全のため上限100ページ
+        target_url = f"{TROUT_BASE_URL}&page={page_num}" if page_num > 1 else TROUT_BASE_URL
+        print(f"商品一覧 {page_num} ページ目を処理中...")
+
         try:
-            page.goto(current_url, wait_until="networkidle", timeout=60000)
-            time.sleep(2)
+            page.goto(target_url, wait_until="networkidle", timeout=60000)
+            time.sleep(1.5)
             soup = BeautifulSoup(page.content(), "html.parser")
 
             # 現ページの全商品を抽出
             page_items = parse_page_products(soup)
-            for item in page_items:
-                if not any(i["url"] == item["url"] for i in all_items):
-                    all_items.append(item)
 
-            # 「次へ」または数字リンク（次のページ）を探す
-            next_url = None
-            next_a = (
-                soup.find("a", string=re.compile(r"次|＞|>|Next", re.I)) or
-                soup.find("a", class_=re.compile(r"next", re.I))
-            )
-
-            if next_a and next_a.get("href"):
-                next_url = urljoin("https://www.kitiya.jp/", next_a["href"])
-            else:
-                # 数字リンクからの検索（現在のページ番号+1）
-                target_p_str = str(page_num + 1)
-                for a in soup.find_all("a", href=True):
-                    if a.get_text(strip=True) == target_p_str:
-                        next_url = urljoin("https://www.kitiya.jp/", a["href"])
-                        break
-
-            # 次のページが存在し、重複していなければ継続
-            if next_url and next_url != current_url:
-                current_url = next_url
-                page_num += 1
-            else:
-                print(f"全 {page_num} ページで巡回完了。")
+            # 新規の商品が取れなくなったら全ページ巡回完了と判断
+            new_items = [item for item in page_items if not any(i["url"] == item["url"] for i in all_items)]
+            
+            if not new_items:
+                print(f"-> {page_num} ページ目で新しい商品が見つからなくなったため巡回を終了します。")
                 break
+
+            all_items.extend(new_items)
+            print(f"   ({len(new_items)} 件取得 / 現在累計: {len(all_items)} 件)")
+            page_num += 1
 
         except Exception as e:
             print(f"ページ巡回エラー（{page_num}ページ目）: {e}")
@@ -336,7 +322,7 @@ def main():
         print(f"ブログ: {len(blog_items)} 件")
         all_scraped_items.extend(blog_items)
 
-        # 2. 商品全ページ取得（全ページ自動巡回）
+        # 2. 商品全ページ取得
         product_items = scrape_products_all_pages(page)
         print(f"商品全ページ合計: {len(product_items)} 件")
         all_scraped_items.extend(product_items)

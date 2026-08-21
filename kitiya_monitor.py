@@ -204,97 +204,108 @@ def scrape_blog(page):
     return items
 
 
-def scrape_products_all_pages(page):
-    all_items = []
-    first_page_url = TROUT_CAT_URL
-    print(f"商品一覧 1 ページ目にアクセス中...")
-    
-    try:
-        # 完全読み込み（networkidle）を指定して待ち時間を確保
-        page.goto(first_page_url, wait_until="networkidle", timeout=60000)
-        time.sleep(3)
-        soup = BeautifulSoup(page.content(), "html.parser")
+def parse_page_products(soup):
+    """HTMLから商品情報を抽出する共通関数"""
+    items = []
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"]
+        if href in ["#", "/"] or "javascript:" in href or "mode=cate" in href or "mode=sk" in href or "apps/note" in href:
+            continue
+
+        full_url = urljoin("https://www.kitiya.jp/", href)
+
+        parent = a_tag.find_parent("li") or a_tag.find_parent("div") or a_tag.find_parent("td")
         
-        # デバッグ用情報（抽出失敗時にリンク傾向を調査）
-        all_links = [a["href"] for a in soup.find_all("a", href=True)]
-        print(f"[DEBUG] 検出された総リンク数: {len(all_links)}")
-        sample_links = [l for l in all_links if "kitiya" in l or "mode=" in l or "pid=" in l or "page=" in l][:10]
-        print(f"[DEBUG] サンプルリンク: {sample_links}")
+        img_tag = a_tag.find("img") or (parent.find("img") if parent else None)
+        title = img_tag.get("alt", "") if img_tag else ""
+        if not title and parent:
+            title = parent.get_text(separator=" ", strip=True)
 
-        # 総ページ数の判別
-        max_page = 1
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            m = re.search(r"page=(\d+)", href)
-            if m:
-                p_num = int(m.group(1))
-                if p_num > max_page:
-                    max_page = p_num
+        if not title or len(title) < 2 or "カート" in title or "詳細" in title or "マイアカウント" in title:
+            continue
 
-        print(f"検出された総ページ数: {max_page} ページ")
+        clean_title = title.split("円")[0].strip() if "円" in title else title
+        clean_title = clean_title[:60]
 
-        for current_p in range(1, max_page + 1):
-            if current_p == 1:
-                p_soup = soup
+        img_url = ""
+        if img_tag:
+            src = img_tag.get("src") or img_tag.get("data-src") or ""
+            if src:
+                img_url = urljoin("https://www.kitiya.jp/", src).replace("http://", "https://")
+
+        price = ""
+        is_soldout = False
+        if parent:
+            parent_text = parent.get_text()
+            if "円" in parent_text:
+                m = re.search(r'[\d,]+円', parent_text)
+                if m:
+                    price = m.group(0)
+            
+            if "SOLDOUT" in parent_text.upper() or "売り切れ" in parent_text or "SOLD OUT" in parent_text.upper():
+                is_soldout = True
+
+        if not any(i["url"] == full_url for i in items):
+            items.append({
+                "title": clean_title,
+                "url": full_url,
+                "img_url": img_url,
+                "price": price,
+                "category": "product",
+                "is_soldout": is_soldout
+            })
+    return items
+
+
+def scrape_products_all_pages(page):
+    """次へリンクを連続追跡して全ページ巡回"""
+    all_items = []
+    current_url = TROUT_CAT_URL
+    page_num = 1
+    
+    print("商品全ページの巡回を開始します...")
+
+    while current_url and page_num <= 50:  # 無限ループ防止のため上限50ページ設定
+        print(f"商品一覧 {page_num} ページ目を処理中: {current_url}")
+        try:
+            page.goto(current_url, wait_until="networkidle", timeout=60000)
+            time.sleep(2)
+            soup = BeautifulSoup(page.content(), "html.parser")
+
+            # 現ページの全商品を抽出
+            page_items = parse_page_products(soup)
+            for item in page_items:
+                if not any(i["url"] == item["url"] for i in all_items):
+                    all_items.append(item)
+
+            # 「次へ」または数字リンク（次のページ）を探す
+            next_url = None
+            next_a = (
+                soup.find("a", string=re.compile(r"次|＞|>|Next", re.I)) or
+                soup.find("a", class_=re.compile(r"next", re.I))
+            )
+
+            if next_a and next_a.get("href"):
+                next_url = urljoin("https://www.kitiya.jp/", next_a["href"])
             else:
-                target_url = f"{TROUT_CAT_URL}&page={current_p}"
-                print(f"商品一覧 {current_p}/{max_page} ページ目を処理中...")
-                page.goto(target_url, wait_until="networkidle", timeout=60000)
-                time.sleep(2)
-                p_soup = BeautifulSoup(page.content(), "html.parser")
+                # 数字リンクからの検索（現在のページ番号+1）
+                target_p_str = str(page_num + 1)
+                for a in soup.find_all("a", href=True):
+                    if a.get_text(strip=True) == target_p_str:
+                        next_url = urljoin("https://www.kitiya.jp/", a["href"])
+                        break
 
-            # 全てのリンクから商品っぽいリンクを抽出
-            for a_tag in p_soup.find_all("a", href=True):
-                href = a_tag["href"]
-                # ドメイン直下の別ページや問い合わせ等の除外
-                if href in ["#", "/"] or "javascript:" in href or "mode=cate" in href or "mode=sk" in href or "apps/note" in href:
-                    continue
+            # 次のページが存在し、重複していなければ継続
+            if next_url and next_url != current_url:
+                current_url = next_url
+                page_num += 1
+            else:
+                print(f"全 {page_num} ページで巡回完了。")
+                break
 
-                full_url = urljoin("https://www.kitiya.jp/", href)
-
-                parent = a_tag.find_parent("li") or a_tag.find_parent("div") or a_tag.find_parent("td")
-                
-                img_tag = a_tag.find("img") or (parent.find("img") if parent else None)
-                title = img_tag.get("alt", "") if img_tag else ""
-                if not title and parent:
-                    title = parent.get_text(separator=" ", strip=True)
-
-                if not title or len(title) < 2 or "カート" in title or "詳細" in title or "マイアカウント" in title:
-                    continue
-
-                clean_title = title.split("円")[0].strip() if "円" in title else title
-                clean_title = clean_title[:60]
-
-                img_url = ""
-                if img_tag:
-                    src = img_tag.get("src") or img_tag.get("data-src") or ""
-                    if src:
-                        img_url = urljoin("https://www.kitiya.jp/", src).replace("http://", "https://")
-
-                price = ""
-                is_soldout = False
-                if parent:
-                    parent_text = parent.get_text()
-                    if "円" in parent_text:
-                        m = re.search(r'[\d,]+円', parent_text)
-                        if m:
-                            price = m.group(0)
-                    
-                    if "SOLDOUT" in parent_text.upper() or "売り切れ" in parent_text or "SOLD OUT" in parent_text.upper():
-                        is_soldout = True
-
-                if not any(i["url"] == full_url for i in all_items):
-                    all_items.append({
-                        "title": clean_title,
-                        "url": full_url,
-                        "img_url": img_url,
-                        "price": price,
-                        "category": "product",
-                        "is_soldout": is_soldout
-                    })
-
-    except Exception as e:
-        print(f"商品スクレイピングエラー: {e}")
+        except Exception as e:
+            print(f"ページ巡回エラー（{page_num}ページ目）: {e}")
+            break
 
     return all_items
 
@@ -325,9 +336,9 @@ def main():
         print(f"ブログ: {len(blog_items)} 件")
         all_scraped_items.extend(blog_items)
 
-        # 2. 商品全ページ取得
+        # 2. 商品全ページ取得（全ページ自動巡回）
         product_items = scrape_products_all_pages(page)
-        print(f"商品全ページ: {len(product_items)} 件")
+        print(f"商品全ページ合計: {len(product_items)} 件")
         all_scraped_items.extend(product_items)
 
         browser.close()

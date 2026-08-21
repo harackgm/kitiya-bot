@@ -70,8 +70,7 @@ def send_line_carousel(items):
                         "uri": item["url"]
                     },
                     "style": "primary",
-                    "color": "#00B900",
-                    "size": "sm"
+                    "color": "#00B900"
                 }
             ]
         }

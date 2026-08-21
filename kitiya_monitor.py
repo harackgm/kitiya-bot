@@ -12,44 +12,71 @@ LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
 
-def send_line_flex(items):
-    """LINE Messaging APIを使って見やすいFlex Message（単一バブル）を送信"""
+def send_line_carousel(items):
+    """サムネイル画像付きのカルーセル（Flex Message）をLINEに送信"""
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
         print("LINEの設定情報（トークン/ID）が見つかりません。")
         return
 
-    # 各記事の要素を作成
-    item_contents = []
-    for i, item in enumerate(items[:3], 1):
-        item_contents.extend([
-            {
-                "type": "text",
-                "text": f"■ {item['title']}",
-                "weight": "bold",
-                "size": "sm",
-                "wrap": True,
-                "color": "#111111"
-            },
-            {
-                "type": "button",
-                "action": {
-                    "type": "uri",
-                    "label": "👉 記事を開く",
-                    "uri": item["url"]
-                },
-                "style": "link",
-                "height": "sm",
-                "margin": "xs"
-            },
-            {
-                "type": "separator",
-                "margin": "md"
-            }
-        ])
+    bubbles = []
+    for item in items[:3]:
+        bubble = {
+            "type": "bubble",
+            "size": "kilo"
+        }
 
-    # 最後の区切り線を削除
-    if item_contents:
-        item_contents.pop()
+        # サムネイル画像が存在する場合は上部画像エリアを追加
+        if item.get("img_url"):
+            bubble["hero"] = {
+                "type": "image",
+                "url": item["img_url"],
+                "size": "full",
+                "aspectRatio": "4:3",
+                "aspectMode": "cover"
+            }
+
+        bubble["body"] = {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "【吉や】入荷情報",
+                    "weight": "bold",
+                    "color": "#1DB446",
+                    "size": "xs"
+                },
+                {
+                    "type": "text",
+                    "text": item["title"],
+                    "weight": "bold",
+                    "size": "sm",
+                    "wrap": True,
+                    "margin": "sm",
+                    "maxLines": 3
+                }
+            ]
+        }
+
+        bubble["footer"] = {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "button",
+                    "action": {
+                        "type": "uri",
+                        "label": "記事を開く",
+                        "uri": item["url"]
+                    },
+                    "style": "primary",
+                    "color": "#00B900",
+                    "size": "sm"
+                }
+            ]
+        }
+
+        bubbles.append(bubble)
 
     payload = {
         "to": LINE_USER_ID,
@@ -58,27 +85,8 @@ def send_line_flex(items):
                 "type": "flex",
                 "altText": "【吉や】最新の入荷情報（3件）",
                 "contents": {
-                    "type": "bubble",
-                    "header": {
-                        "type": "box",
-                        "layout": "vertical",
-                        "backgroundColor": "#00B900",
-                        "contents": [
-                            {
-                                "type": "text",
-                                "text": "【吉や】最新入荷情報 (上位3件)",
-                                "weight": "bold",
-                                "color": "#FFFFFF",
-                                "size": "sm"
-                            }
-                        ]
-                    },
-                    "body": {
-                        "type": "box",
-                        "layout": "vertical",
-                        "contents": item_contents,
-                        "spacing": "sm"
-                    }
+                    "type": "carousel",
+                    "contents": bubbles
                 }
             }
         ]
@@ -93,7 +101,7 @@ def send_line_flex(items):
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=10)
         res.raise_for_status()
-        print("LINEへの通知送信に成功しました！")
+        print("サムネイル付きカルーセルの送信に成功しました！")
     except Exception as e:
         print(f"LINE通知エラー: {e}")
         if hasattr(e, 'response') and e.response is not None:
@@ -105,7 +113,6 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # 日本語環境を指定してアクセス（英文表示を防止）
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             locale="ja-JP",
@@ -140,23 +147,38 @@ def main():
                 parent_text = a_tag.parent.get_text(separator=" ", strip=True)
                 text = parent_text if parent_text else "最新入荷情報"
 
-            # 「SNS」などの余分な文字列を取り除き、長すぎる文章をカット
+            # 余分な文字列を取り除き、文字数を適切に制限
             clean_text = text.replace("SNS", "").strip()
-            if len(clean_text) > 80:
-                clean_text = clean_text[:77] + "..."
+            if len(clean_text) > 60:
+                clean_text = clean_text[:57] + "..."
 
-            # 重複を排除して追加
+            # サムネイル画像（imgタグ）のURLを取得
+            img_tag = a_tag.find("img")
+            if not img_tag and a_tag.parent:
+                img_tag = a_tag.parent.find("img")
+
+            img_url = ""
+            if img_tag:
+                src = img_tag.get("src") or img_tag.get("data-src") or ""
+                if src:
+                    img_url = urljoin(TARGET_URL, src)
+                    # LINEのFlex Messageはhttps必須
+                    if img_url.startswith("http://"):
+                        img_url = img_url.replace("http://", "https://")
+
+            # 重複防止で追加
             if not any(item["url"] == full_url for item in current_items):
                 current_items.append({
                     "title": clean_text,
-                    "url": full_url
+                    "url": full_url,
+                    "img_url": img_url
                 })
 
     print(f"ブログ一覧から {len(current_items)} 件の記事を取得しました。")
 
     if current_items:
-        # 上位3件をきれいなカード形式で送信
-        send_line_flex(current_items[:3])
+        # 上位3件を画像付きカルーセルで送信
+        send_line_carousel(current_items[:3])
     else:
         print("表示できる入荷情報が見つかりませんでした。")
 

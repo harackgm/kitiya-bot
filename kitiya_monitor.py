@@ -2,14 +2,15 @@ import os
 import sqlite3
 import requests
 import time
+import re
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from playwright.sync_api import sync_playwright
 
 # --- 設定情報 ---
 BLOG_URL = "https://www.kitiya.jp/apps/note/"
-PRODUCTS_URL_P1 = "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n"
-PRODUCTS_URL_P2 = "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n&page=2"
+# トラウトカテゴリー（新着順・全ページ巡回対象）
+TROUT_CAT_URL = "https://www.kitiya.jp/?mode=cate&cbid=2590067&csid=0&sort=n"
 
 DB_FILE = "kitiya_data.db"
 
@@ -99,7 +100,6 @@ def send_line_carousel(items):
             ]
         }
 
-        # 商品情報で価格がある場合は追加表示
         if item.get("price"):
             bubble["body"]["contents"].append({
                 "type": "text",
@@ -197,57 +197,84 @@ def scrape_blog(page):
     return items
 
 
-def scrape_products(page, url):
-    """商品新着一覧（1・2ページ目）のスクレイピング"""
-    items = []
+def scrape_products_all_pages(page):
+    """トラウトカテゴリーの全ページ（最大ページ数を自動判別）を巡回スクレイピング"""
+    all_items = []
+    
+    # まず1ページ目にアクセスして最大ページ数を取得
+    first_page_url = TROUT_CAT_URL
+    print(f"商品一覧 1 ページ目にアクセス中: {first_page_url}")
+    
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.goto(first_page_url, wait_until="domcontentloaded", timeout=60000)
         time.sleep(2)
         soup = BeautifulSoup(page.content(), "html.parser")
+        
+        # ページネーションから最大ページ数を検出
+        max_page = 1
+        page_links = soup.find_all("a", href=re.compile(r"page=\d+"))
+        for p_link in page_links:
+            m = re.search(r"page=(\d+)", p_link["href"])
+            if m:
+                p_num = int(m.group(1))
+                if p_num > max_page:
+                    max_page = p_num
 
-        # カラーズ（Colorme）標準の商品セル/リンクを取得
-        for a_tag in soup.find_all("a", href=True):
-            href = a_tag["href"]
-            if "?pid=" in href:
-                full_url = urljoin("https://www.kitiya.jp/", href)
+        print(f"検出された総ページ数: {max_page} ページ")
 
-                # 商品名と画像の抽出
-                img_tag = a_tag.find("img")
-                title = img_tag.get("alt", "") if img_tag else ""
-                if not title:
-                    title = a_tag.get_text(strip=True)
+        # 1ページ目から順番に巡回
+        for current_p in range(1, max_page + 1):
+            if current_p == 1:
+                p_soup = soup
+            else:
+                target_url = f"{TROUT_CAT_URL}&page={current_p}"
+                print(f"商品一覧 {current_p}/{max_page} ページ目を処理中...")
+                page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+                time.sleep(1.5)  # サーバー負荷軽減のウェイト
+                p_soup = BeautifulSoup(page.content(), "html.parser")
 
-                if not title or len(title) < 3:
-                    continue
+            # 商品要素の抽出
+            for a_tag in p_soup.find_all("a", href=True):
+                href = a_tag["href"]
+                if "?pid=" in href:
+                    full_url = urljoin("https://www.kitiya.jp/", href)
 
-                img_url = ""
-                if img_tag:
-                    src = img_tag.get("src") or ""
-                    if src:
-                        img_url = urljoin("https://www.kitiya.jp/", src).replace("http://", "https://")
+                    img_tag = a_tag.find("img")
+                    title = img_tag.get("alt", "") if img_tag else ""
+                    if not title:
+                        title = a_tag.get_text(strip=True)
 
-                # 親要素から価格の取得を試みる
-                price = ""
-                parent = a_tag.find_parent("li") or a_tag.find_parent("div")
-                if parent:
-                    price_text = parent.get_text()
-                    if "円" in price_text:
-                        import re
-                        m = re.search(r'[\d,]+円', price_text)
-                        if m:
-                            price = m.group(0)
+                    if not title or len(title) < 3:
+                        continue
 
-                if not any(i["url"] == full_url for i in items):
-                    items.append({
-                        "title": title[:60],
-                        "url": full_url,
-                        "img_url": img_url,
-                        "price": price,
-                        "category": "product"
-                    })
+                    img_url = ""
+                    if img_tag:
+                        src = img_tag.get("src") or ""
+                        if src:
+                            img_url = urljoin("https://www.kitiya.jp/", src).replace("http://", "https://")
+
+                    price = ""
+                    parent = a_tag.find_parent("li") or a_tag.find_parent("div")
+                    if parent:
+                        price_text = parent.get_text()
+                        if "円" in price_text:
+                            m = re.search(r'[\d,]+円', price_text)
+                            if m:
+                                price = m.group(0)
+
+                    if not any(i["url"] == full_url for i in all_items):
+                        all_items.append({
+                            "title": title[:60],
+                            "url": full_url,
+                            "img_url": img_url,
+                            "price": price,
+                            "category": "product"
+                        })
+
     except Exception as e:
-        print(f"商品一覧スクレイピングエラー: {e}")
-    return items
+        print(f"商品全ページスクレイピングエラー: {e}")
+
+    return all_items
 
 
 def main():
@@ -256,9 +283,9 @@ def main():
     is_first_run = len(stored_urls) == 0
 
     if is_first_run:
-        print("【初回実行】DBが空のため全件登録のみ行います（通知なし）。")
+        print("【初回実行】DBが空のため全商品・全ブログ記事の初回登録を行います（LINE通知はスキップ）。")
 
-    print("ブラウザを起動して『入荷ブログ』および『商品新着一覧（P1, P2）』へアクセス中...")
+    print("ブラウザを起動して『入荷ブログ』および『トラウト全商品ページ』へアクセス中...")
 
     all_scraped_items = []
 
@@ -276,23 +303,18 @@ def main():
         print(f"ブログから {len(blog_items)} 件取得")
         all_scraped_items.extend(blog_items)
 
-        # 2. 商品新着一覧 P1 取得
-        p1_items = scrape_products(page, PRODUCTS_URL_P1)
-        print(f"商品一覧(1ページ目)から {len(p1_items)} 件取得")
-        all_scraped_items.extend(p1_items)
-
-        # 3. 商品新着一覧 P2 取得
-        p2_items = scrape_products(page, PRODUCTS_URL_P2)
-        print(f"商品一覧(2ページ目)から {len(p2_items)} 件取得")
-        all_scraped_items.extend(p2_items)
+        # 2. トラウト全ページ取得
+        product_items = scrape_products_all_pages(page)
+        print(f"トラウト全ページから {len(product_items)} 件の商品を取得")
+        all_scraped_items.extend(product_items)
 
         browser.close()
 
-    print(f"合計 {len(all_scraped_items)} 件のデータをチェックします。")
+    print(f"合計 {len(all_scraped_items)} 件のデータをデータベースと照合します。")
 
     if is_first_run:
         save_urls(conn, all_scraped_items)
-        print(f"初回処理完了: {len(all_scraped_items)} 件のURLをDBに保存しました（LINE通知はスキップ）。")
+        print(f"初回処理完了: {len(all_scraped_items)} 件のURLをDBに一括保存しました（LINE通知はスキップ）。")
     else:
         new_items = [item for item in all_scraped_items if item["url"] not in stored_urls]
 

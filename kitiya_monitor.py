@@ -29,12 +29,36 @@ def clean_image_url(img_tag, base_url):
         full_url = full_url.replace("http://", "https://", 1)
     return full_url
 
+def fetch_blog_og_image(article_url):
+    """個別記事ページからOGP画像(アイキャッチ画像)や本文画像を取得"""
+    try:
+        res = requests.get(article_url, timeout=10)
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        # OGPメタタグから画像を探す（WordPressブログで最も確実にサムネイルを取得可能）
+        og_image = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
+        if og_image and og_image.get("content"):
+            img_url = og_image["content"]
+            if img_url.startswith("http://"):
+                img_url = img_url.replace("http://", "https://", 1)
+            return img_url
+        
+        # OGPが無い場合は本文内の1枚目の画像を取得
+        content_area = soup.select_one(".entry-content, article, .post-content, #main") or soup
+        for img in content_area.select("img"):
+            src = clean_image_url(img, article_url)
+            if src and "avatar" not in src and "logo" not in src:
+                return src
+    except Exception as e:
+        print(f"ブログ画像取得エラー ({article_url}): {e}")
+    return ""
+
 def extract_blog_item(article, base_url):
     """記事要素から個別記事のURL(/archives/XXXX)・タイトル・画像を取得"""
-    # archives/ や数字のみの個別パーマリンクを優先取得
+    # archives/ や数字IDを持つ個別パーマリンクを優先検索
     a_tag = article.find("a", href=lambda h: h and ("archives" in h or re.search(r'/\d+/?$', h)))
     if not a_tag:
-        # トップページ以外のリンクを探す
         for a in article.select("h1 a, h2 a, h3 a, .entry-title a, a"):
             href = a.get("href", "")
             if href and urljoin(base_url, href).rstrip('/') != base_url.rstrip('/'):
@@ -54,8 +78,11 @@ def extract_blog_item(article, base_url):
         if title_elem:
             title = title_elem.get_text(strip=True)
 
+    # 一覧の画像タグを取得、無ければ個別記事へアクセスして高画質画像を取得
     img_tag = article.select_one("img")
     img_url = clean_image_url(img_tag, base_url)
+    if not img_url:
+        img_url = fetch_blog_og_image(url)
 
     return {
         "title": title or "ブログ更新のお知らせ",
@@ -94,7 +121,7 @@ def is_initial_run():
 
 # --- スクレイピング処理 ---
 def check_blog_updates(initial_run=False):
-    """ブログの更新チェック（archives/等の個別記事URLを正しく取得）"""
+    """ブログの更新チェック"""
     new_items = []
     try:
         response = requests.get(BLOG_URL, timeout=10)
@@ -318,10 +345,11 @@ def run_live_test():
             break
 
     if not blog_item:
+        article_url = "https://www.kitiya.jp/apps/note/archives/23614"
         blog_item = {
             "title": "【テスト通知】ブログ最新記事",
-            "url": "https://www.kitiya.jp/apps/note/archives/23614",
-            "img_url": "",
+            "url": article_url,
+            "img_url": fetch_blog_og_image(article_url),
             "category": "blog",
             "status_type": "new"
         }

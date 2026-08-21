@@ -2,9 +2,9 @@ name: Kitiya Monitor Bot
 
 on:
   schedule:
-    # 毎日 日本時間 8:00, 12:00, 18:00 の3回実行する例（UTC指定）
+    # 毎日 日本時間 8:00, 12:00, 18:00 の3回自動実行（UTC指定）
     - cron: '0 23,3,9 * * *'
-  workflow_dispatch: # 手動実行用ボタンを有効化
+  workflow_dispatch: # 手動実行ボタンを有効化
 
 jobs:
   scrape-and-notify:
@@ -25,7 +25,7 @@ jobs:
         pip install -r requirements.txt
         playwright install chromium
 
-    # 前回のSQLiteデータベースをキャッシュから復元する
+    # 前回のSQLiteデータベースをキャッシュから復元
     - name: Restore SQLite DB Cache
       uses: actions/cache/restore@v4
       with:
@@ -34,17 +34,17 @@ jobs:
         restore-keys: |
           sqlite-db-
 
+    # 本番実行コマンド
     - name: Run Monitor Script
       env:
-        # GitHubの "Settings" -> "Secrets and variables" -> "Actions" に設定
         LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
         LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-      run: python kitiya_monitor.py --test
+      run: python kitiya_monitor.py
 
-    # 実行後の更新されたSQLiteデータベースをキャッシュとして保存する
+    # 更新されたSQLiteデータベースをキャッシュとして保存
     - name: Save SQLite DB Cache
       uses: actions/cache/save@v4
-      if: always() # スクリプトがエラーになっても現状のDBを保存する
+      if: always()
       with:
         path: kitiya_data.db
         key: sqlite-db-${{ github.run_id }}

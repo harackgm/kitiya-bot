@@ -11,80 +11,32 @@ LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
 
-def send_line_flex_carousel(items):
-    """LINE Messaging APIを使ってカルーセル（Flex Message）を送信"""
+def send_line_text(message):
+    """LINE Messaging APIを使ってテキストメッセージを送信"""
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
         print("LINEの設定情報（トークン/ID）が見つかりません。")
         return
-
-    bubbles = []
-    for item in items[:10]:  # 最新10件を取得
-        bubble = {
-            "type": "bubble",
-            "size": "mega",  # micro から mega に拡大して大きく表示
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": "【吉や】現在掲載中の商品",
-                        "weight": "bold",
-                        "color": "#1DB446",
-                        "size": "sm",
-                    },
-                    {
-                        "type": "text",
-                        "text": item["title"],
-                        "weight": "bold",
-                        "size": "md",
-                        "wrap": True,
-                        "margin": "md",
-                    },
-                ],
-            },
-            "footer": {
-                "type": "box",
-                "layout": "vertical",
-                "spacing": "sm",
-                "contents": [
-                    {
-                        "type": "button",
-                        "action": {
-                            "type": "uri",
-                            "label": "吉やHPで確認する",
-                            "uri": TARGET_URL,
-                        },
-                        "style": "primary",
-                        "color": "#00B900",
-                        "size": "md",
-                    }
-                ],
-            },
-        }
-        bubbles.append(bubble)
 
     payload = {
         "to": LINE_USER_ID,
         "messages": [
             {
-                "type": "flex",
-                "altText": "【吉や】現在掲載されている最新10件",
-                "contents": {"type": "carousel", "contents": bubbles},
+                "type": "text",
+                "text": message
             }
-        ],
+        ]
     }
 
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
     }
 
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=10)
         res.raise_for_status()
-        print("LINEへのカルーセル送信に成功しました。")
+        print("LINEへのテキスト送信に成功しました。")
     except Exception as e:
         print(f"LINE通知エラー: {e}")
 
@@ -95,12 +47,8 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 800},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800}
         )
         page = context.new_page()
 
@@ -118,20 +66,27 @@ def main():
     soup = BeautifulSoup(html, "html.parser")
     current_items = []
 
-    for element in soup.find_all(
-        ["div", "td", "p", "li"], string=lambda t: t and "円" in t
-    ):
+    # HP上で現在掲載されている商品要素を取得
+    for element in soup.find_all(["div", "td", "p", "li"], string=lambda t: t and "円" in t):
         parent = element.parent
         full_text = parent.get_text(separator=" ", strip=True)
 
         if len(full_text) < 150 and "カート" not in full_text:
-            if not any(item["title"] == full_text for item in current_items):
-                current_items.append({"title": full_text})
+            if full_text not in current_items:
+                current_items.append(full_text)
 
     print(f"現在HPから {len(current_items)} 件を取得しました。")
 
     if current_items:
-        send_line_flex_carousel(current_items[:10])
+        # 最新10件を1つのテキストメッセージに整形
+        msg = "【吉や】現在掲載中の最新10件\n"
+        msg += "------------------------\n"
+        for i, item in enumerate(current_items[:10], 1):
+            msg += f"{i}. {item}\n"
+        msg += "------------------------\n"
+        msg += f"▼HPで確認\n{TARGET_URL}"
+
+        send_line_text(msg)
     else:
         print("表示できる商品要素が見つかりませんでした。")
 

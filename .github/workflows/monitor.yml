@@ -1,41 +1,51 @@
-name: Kitiya Stock Monitor
+name: Kitiya Monitor Bot
 
 on:
   schedule:
-    # 30分ごとに自動実行（UTC表記のためJSTとの差に注意）
-    - cron: '*/30 * * * *'
-  workflow_dispatch: # 手動実行用ボタン
+    # 毎日 日本時間 8:00, 12:00, 18:00 の3回実行する例（UTC指定）
+    # ※ クーロン式はお好みの間隔に変更してください
+    - cron: '0 23,3,9 * * *'
+  workflow_dispatch: # 手動実行用ボタンを有効化
 
 jobs:
-  monitor:
+  scrape-and-notify:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+    - name: Checkout Repository
+      uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
 
-      - name: Cache SQLite DB
-        uses: actions/cache@v4
-        with:
-          path: kitiya_products.db
-          key: kitiya-db-${{ github.run_id }}
-          restore-keys: |
-            kitiya-db-
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        playwright install chromium
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          playwright install chromium --with-deps
+    # 前回のSQLiteデータベースをキャッシュから復元する
+    - name: Restore SQLite DB Cache
+      uses: actions/cache/restore@v4
+      with:
+        path: kitiya_data.db
+        key: sqlite-db-${{ github.run_id }}
+        restore-keys: |
+          sqlite-db-
 
-      - name: Run monitor script
-        env:
-          LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-        run: |
-          python kitiya_monitor.py
+    - name: Run Monitor Script
+      env:
+        # GitHubの "Settings" -> "Secrets and variables" -> "Actions" に設定してください
+        LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
+        LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+      run: python kitiya_monitor.py
+
+    # 実行後の更新されたSQLiteデータベースをキャッシュとして保存する
+    - name: Save SQLite DB Cache
+      uses: actions/cache/save@v4
+      if: always() # スクリプトがエラーになっても現状のDBを保存する
+      with:
+        path: kitiya_data.db
+        key: sqlite-db-${{ github.run_id }}

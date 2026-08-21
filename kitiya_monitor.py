@@ -256,7 +256,7 @@ def check_product_updates(initial_run=False):
 
     return new_items
 
-# --- LINE通知処理（デザインカスタマイズ版） ---
+# --- LINE通知処理（デザインカスタマイズ・元のkiloサイズ版） ---
 def send_line_carousel(items):
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
         print("LINEの設定情報（トークン/ID）が見つかりません。")
@@ -286,10 +286,10 @@ def send_line_carousel(items):
                 btn_label = "商品ページへ"
                 color_code = "#E60012"  # 赤色
 
-            # コンパクトな micro サイズ
+            # 元の見やすい kilo サイズに戻す
             bubble = {
                 "type": "bubble",
-                "size": "micro"
+                "size": "kilo"
             }
             
             if item.get("img_url"):
@@ -297,7 +297,7 @@ def send_line_carousel(items):
                     "type": "image",
                     "url": item["img_url"],
                     "size": "full",
-                    "aspectRatio": "1:1",  # 正方形でキレイに配置
+                    "aspectRatio": "4:3",
                     "aspectMode": "cover"
                 }
 
@@ -308,7 +308,7 @@ def send_line_carousel(items):
                     "text": category_name,
                     "weight": "bold",
                     "color": color_code,
-                    "size": "xxs",
+                    "size": "xs",
                     "flex": 1
                 }
             ]
@@ -319,7 +319,7 @@ def send_line_carousel(items):
                     "size": "xxs",
                     "aspectMode": "fit",
                     "flex": 0,
-                    "margin": "xs"
+                    "margin": "sm"
                 })
 
             bubble["body"] = {
@@ -336,10 +336,10 @@ def send_line_carousel(items):
                         "type": "text",
                         "text": item["title"],
                         "weight": "bold",
-                        "size": "xs",
+                        "size": "sm",
                         "wrap": True,
-                        "margin": "xs",
-                        "maxLines": 2
+                        "margin": "sm",
+                        "maxLines": 3
                     }
                 ]
             }
@@ -348,7 +348,7 @@ def send_line_carousel(items):
                 bubble["body"]["contents"].append({
                     "type": "text",
                     "text": f"価格: {item['price']}",
-                    "size": "xxs",
+                    "size": "xs",
                     "color": "#111111",
                     "weight": "bold",
                     "margin": "xs"
@@ -366,8 +366,7 @@ def send_line_carousel(items):
                             "uri": item["url"]
                         },
                         "style": "primary",
-                        "color": color_code,
-                        "height": "sm"
+                        "color": color_code
                     }
                 ]
             }

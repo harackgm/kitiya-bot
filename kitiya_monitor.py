@@ -67,37 +67,44 @@ def main():
     soup = BeautifulSoup(html, "html.parser")
     current_items = []
 
-    # 商品リンクを含む要素を探して商品名・価格・URLを取得
+    # 入荷情報ブログ（/apps/note/archives/...）のリンク要素を抽出
     for a_tag in soup.find_all("a", href=True):
-        text = a_tag.get_text(separator=" ", strip=True)
-        
-        # 金額（円）が含まれるリンク要素を抽出
-        if "円" in text and len(text) > 5 and len(text) < 200:
-            link_url = urljoin(TARGET_URL, a_tag["href"])
+        href = a_tag["href"]
+        if "/apps/note/archives/" in href:
+            full_url = urljoin(TARGET_URL, href)
             
-            # 重複防止
-            if not any(item["url"] == link_url for item in current_items):
+            # ホバー時や画像内のテキスト・alt情報を取得
+            text = a_tag.get_text(separator=" ", strip=True)
+            img = a_tag.find("img")
+            img_alt = img.get("alt", "") if img else ""
+            
+            # テキストまたはalt属性からタイトルを抽出
+            title = text if text else img_alt
+            if not title:
+                title = "最新入荷情報"
+
+            # 重複チェック（同じ記事URLは1つにまとめる）
+            if not any(item["url"] == full_url for item in current_items):
                 current_items.append({
-                    "info": text,
-                    "url": link_url
+                    "title": title,
+                    "url": full_url
                 })
 
-    print(f"現在HPから {len(current_items)} 件の商品情報を取得しました。")
+    print(f"入荷情報を {len(current_items)} 件取得しました。")
 
     if current_items:
-        # 件数を3件に変更
-        msg = "【吉や】現在掲載中の最新3件\n"
+        msg = "【吉や】最新の入荷情報（上位3件）\n"
         msg += "========================\n\n"
         
         for i, item in enumerate(current_items[:3], 1):
-            msg += f"■ {i}. {item['info']}\n"
+            msg += f"■ {i}. {item['title']}\n"
             msg += f"🔗 {item['url']}\n\n"
             
         msg += "========================"
 
         send_line_text(msg)
     else:
-        print("表示できる商品要素が見つかりませんでした。")
+        print("表示できる入荷情報が見つかりませんでした。")
 
 
 if __name__ == "__main__":

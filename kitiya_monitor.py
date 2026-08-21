@@ -12,6 +12,9 @@ BLOG_URL = "https://www.kitiya.jp/apps/note/"
 TROUT_BASE_URL = "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n"
 DB_FILE = "kitiya_data.db"
 
+# 吉やのロゴマーク（カード右上に表示）
+KITIYA_LOGO_URL = "https://www.kitiya.jp/apps/note/wp-content/uploads/2023/01/cropped-logo-192x192.png"
+
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
@@ -30,13 +33,12 @@ def clean_image_url(img_tag, base_url):
     return full_url
 
 def fetch_blog_og_image(article_url):
-    """個別記事ページからOGP画像(アイキャッチ画像)や本文画像を取得"""
+    """個別記事ページからOGP画像(アイキャッチ画像)を取得"""
     try:
         res = requests.get(article_url, timeout=10)
         res.raise_for_status()
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # OGPメタタグから画像を探す（WordPressブログで最も確実にサムネイルを取得可能）
         og_image = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
         if og_image and og_image.get("content"):
             img_url = og_image["content"]
@@ -44,7 +46,6 @@ def fetch_blog_og_image(article_url):
                 img_url = img_url.replace("http://", "https://", 1)
             return img_url
         
-        # OGPが無い場合は本文内の1枚目の画像を取得
         content_area = soup.select_one(".entry-content, article, .post-content, #main") or soup
         for img in content_area.select("img"):
             src = clean_image_url(img, article_url)
@@ -56,7 +57,6 @@ def fetch_blog_og_image(article_url):
 
 def extract_blog_item(article, base_url):
     """記事要素から個別記事のURL(/archives/XXXX)・タイトル・画像を取得"""
-    # archives/ や数字IDを持つ個別パーマリンクを優先検索
     a_tag = article.find("a", href=lambda h: h and ("archives" in h or re.search(r'/\d+/?$', h)))
     if not a_tag:
         for a in article.select("h1 a, h2 a, h3 a, .entry-title a, a"):
@@ -78,7 +78,6 @@ def extract_blog_item(article, base_url):
         if title_elem:
             title = title_elem.get_text(strip=True)
 
-    # 一覧の画像タグを取得、無ければ個別記事へアクセスして高画質画像を取得
     img_tag = article.select_one("img")
     img_url = clean_image_url(img_tag, base_url)
     if not img_url:
@@ -121,7 +120,6 @@ def is_initial_run():
 
 # --- スクレイピング処理 ---
 def check_blog_updates(initial_run=False):
-    """ブログの更新チェック"""
     new_items = []
     try:
         response = requests.get(BLOG_URL, timeout=10)
@@ -154,7 +152,6 @@ def check_blog_updates(initial_run=False):
     return new_items
 
 def check_product_updates(initial_run=False):
-    """商品ページの全ページ更新チェック"""
     new_items = []
     page_num = 1
     all_seen_urls = set()
@@ -259,7 +256,7 @@ def check_product_updates(initial_run=False):
 
     return new_items
 
-# --- LINE通知処理 ---
+# --- LINE通知処理（デザインカスタマイズ版） ---
 def send_line_carousel(items):
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
         print("LINEの設定情報（トークン/ID）が見つかりません。")
@@ -274,41 +271,104 @@ def send_line_carousel(items):
 
         for item in chunk:
             status_type = item.get("status_type", "new")
+            
+            # 配色・見出し・ボタンラベルの設定
             if item.get("category") == "blog":
-                category_name, btn_label = "【吉や】ブログ更新", "記事を読む"
-                color_code = "#1DB446"
+                category_name = "【吉や】ブログ更新"
+                btn_label = "じょうほうを読む"
+                color_code = "#00B900"  # 緑色
             elif status_type == "restock":
-                category_name, btn_label = "【吉や】🔥再入荷情報！", "商品ページへ"
-                color_code = "#E60012"
+                category_name = "【吉や】🔥再入荷情報！"
+                btn_label = "商品ページへ"
+                color_code = "#E69D00"  # 黄色（ゴールド調）
             else:
-                category_name, btn_label = "【吉や】✨新入荷商品", "商品ページへ"
-                color_code = "#1DB446"
+                category_name = "【吉や】✨新入荷商品"
+                btn_label = "商品ページへ"
+                color_code = "#E60012"  # 赤色
 
-            bubble = {"type": "bubble", "size": "kilo"}
+            # コンパクトな micro サイズ
+            bubble = {
+                "type": "bubble",
+                "size": "micro"
+            }
             
             if item.get("img_url"):
                 bubble["hero"] = {
-                    "type": "image", "url": item["img_url"], "size": "full",
-                    "aspectRatio": "4:3", "aspectMode": "cover"
+                    "type": "image",
+                    "url": item["img_url"],
+                    "size": "full",
+                    "aspectRatio": "1:1",  # 正方形でキレイに配置
+                    "aspectMode": "cover"
                 }
 
+            # 見出し行（左にカテゴリ名 ＋ 右端に吉やロゴマーク）
+            header_contents = [
+                {
+                    "type": "text",
+                    "text": category_name,
+                    "weight": "bold",
+                    "color": color_code,
+                    "size": "xxs",
+                    "flex": 1
+                }
+            ]
+            if KITIYA_LOGO_URL:
+                header_contents.append({
+                    "type": "image",
+                    "url": KITIYA_LOGO_URL,
+                    "size": "xxs",
+                    "aspectMode": "fit",
+                    "flex": 0,
+                    "margin": "xs"
+                })
+
             bubble["body"] = {
-                "type": "box", "layout": "vertical",
+                "type": "box",
+                "layout": "vertical",
                 "contents": [
-                    {"type": "text", "text": category_name, "weight": "bold", "color": color_code, "size": "xs"},
-                    {"type": "text", "text": item["title"], "weight": "bold", "size": "sm", "wrap": True, "margin": "sm", "maxLines": 3}
+                    {
+                        "type": "box",
+                        "layout": "horizontal",
+                        "contents": header_contents,
+                        "alignItems": "center"
+                    },
+                    {
+                        "type": "text",
+                        "text": item["title"],
+                        "weight": "bold",
+                        "size": "xs",
+                        "wrap": True,
+                        "margin": "xs",
+                        "maxLines": 2
+                    }
                 ]
             }
 
             if item.get("price"):
-                bubble["body"]["contents"].append(
-                    {"type": "text", "text": f"価格: {item['price']}", "size": "xs", "color": "#111111", "weight": "bold", "margin": "xs"}
-                )
+                bubble["body"]["contents"].append({
+                    "type": "text",
+                    "text": f"価格: {item['price']}",
+                    "size": "xxs",
+                    "color": "#111111",
+                    "weight": "bold",
+                    "margin": "xs"
+                })
 
             bubble["footer"] = {
-                "type": "box", "layout": "vertical",
+                "type": "box",
+                "layout": "vertical",
                 "contents": [
-                    {"type": "button", "action": {"type": "uri", "label": btn_label, "uri": item["url"]}, "style": "primary", "color": color_code}
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "uri",
+                            "label": btn_label,
+                            "uri": item["url"]
+                        },
+                        "style": "primary",
+                        "color": color_code,
+                        "height": "sm"
+                    }
                 ]
             }
             bubbles.append(bubble)
@@ -329,10 +389,8 @@ def send_line_carousel(items):
 
 # --- テスト送信専用処理 ---
 def run_live_test():
-    """実サイトからデータを取得し、見た目と直リンクテスト用にLINE送信"""
     print("📱 実際のサイトからテスト通知用データを取得中...")
     
-    # ブログから最新個別記事を取得
     blog_res = requests.get(BLOG_URL, timeout=10)
     blog_soup = BeautifulSoup(blog_res.text, "html.parser")
     articles = blog_soup.select("article, .post, .entry, .post-list-item")
@@ -354,7 +412,6 @@ def run_live_test():
             "status_type": "new"
         }
 
-    # 商品1ページ目から最新2件を取得
     test_products = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)

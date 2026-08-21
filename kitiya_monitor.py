@@ -1,4 +1,5 @@
 import os
+import sys
 import sqlite3
 import requests
 import re
@@ -14,34 +15,39 @@ DB_FILE = "kitiya_data.db"
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
+# --- ヘルパー関数 ---
+def clean_image_url(img_tag, base_url):
+    """遅延読み込み(Lazy Load)に対応して正しい画像URLを取得"""
+    if not img_tag:
+        return ""
+    # data-src, data-original, src の順で探索
+    src = img_tag.get("data-src") or img_tag.get("data-original") or img_tag.get("src") or ""
+    if not src or "blank.gif" in src or "spacer.gif" in src or "transparent" in src:
+        return ""
+    
+    full_url = urljoin(base_url, src)
+    if full_url.startswith("http://"):
+        full_url = full_url.replace("http://", "https://", 1)
+    return full_url
+
 # --- データベース処理 ---
 def init_db():
-    """データベースとテーブルの初期化"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS blog_posts (
-            url TEXT PRIMARY KEY,
-            title TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            url TEXT PRIMARY KEY, title TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS products (
-            url TEXT PRIMARY KEY,
-            title TEXT,
-            price TEXT,
-            is_sold_out INTEGER,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            url TEXT PRIMARY KEY, title TEXT, price TEXT, is_sold_out INTEGER, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
     conn.close()
 
 def is_initial_run():
-    """DBが空（初回実行）かどうかを判定"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM products")
@@ -52,8 +58,8 @@ def is_initial_run():
     return (p_count == 0 and b_count == 0)
 
 # --- スクレイピング処理 ---
-def check_blog_updates(initial_run):
-    """ブログの更新チェック"""
+def check_blog_updates(initial_run=False):
+    """ブログの更新チェック（最新個別記事URLと画像を正確に取得）"""
     new_items = []
     try:
         response = requests.get(BLOG_URL, timeout=10)
@@ -63,16 +69,17 @@ def check_blog_updates(initial_run):
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
 
-        articles = soup.select("article, .post-list-item, .entry")
-        for article in articles[:10]:
-            title_tag = article.select_one("h2 a, .entry-title a, a")
+        articles = soup.select("article, .post, .entry, .post-list-item")
+        for article in articles[:5]:
+            title_tag = article.select_one("h1 a, h2 a, .entry-title a, a")
             if not title_tag or not title_tag.get("href"):
                 continue
 
             title = title_tag.get_text(strip=True)
             url = urljoin(BLOG_URL, title_tag["href"])
+            
             img_tag = article.select_one("img")
-            img_url = urljoin(BLOG_URL, img_tag["src"]) if img_tag and img_tag.get("src") else ""
+            img_url = clean_image_url(img_tag, BLOG_URL)
 
             cursor.execute("SELECT url FROM blog_posts WHERE url = ?", (url,))
             if not cursor.fetchone():
@@ -90,12 +97,11 @@ def check_blog_updates(initial_run):
 
     return new_items
 
-def check_product_updates(initial_run):
-    """商品ページの全ページ更新チェック（Playwright使用）"""
+def check_product_updates(initial_run=False):
+    """商品ページの全ページ更新チェック"""
     new_items = []
     page_num = 1
-    total_saved = 0
-    all_seen_urls = set()  # 今回の実行で巡回した全商品URLの記録
+    all_seen_urls = set()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -105,17 +111,13 @@ def check_product_updates(initial_run):
         cursor = conn.cursor()
 
         while True:
-            if page_num == 1:
-                url = TROUT_BASE_URL
-            else:
-                url = f"{TROUT_BASE_URL}&page={page_num}"
+            url = TROUT_BASE_URL if page_num == 1 else f"{TROUT_BASE_URL}&page={page_num}"
                 
             try:
-                print(f"ページ {page_num} を巡回中... ({url})")
+                print(f"ページ {page_num} を巡回中...")
                 page.goto(url, wait_until="networkidle")
                 soup = BeautifulSoup(page.content(), "html.parser")
 
-                # メインエリア優先で商品枠を取得
                 main_area = soup.select_one("#main, .main_content, .product_list, .item_list") or soup
                 product_list = main_area.select(".product_item, .item_box, li.item, .product_list li, .item_list li")
 
@@ -129,16 +131,15 @@ def check_product_updates(initial_run):
                     product_list = containers
 
                 new_urls_in_this_page = 0
-                items_in_page = 0
 
                 for item in product_list:
                     a_tag = item.find("a", href=lambda h: h and "pid=" in h) or item.select_one("a")
                     if not a_tag or not a_tag.get("href"):
                         continue
 
+                    # ?pid=XXXX 形式の正確な個別商品URLを取得
                     item_url = urljoin(url, a_tag["href"])
 
-                    # このページで未登録のURLかチェック
                     if item_url not in all_seen_urls:
                         all_seen_urls.add(item_url)
                         new_urls_in_this_page += 1
@@ -159,7 +160,7 @@ def check_product_updates(initial_run):
                     price = price_match.group(0) if price_match else "価格不詳"
 
                     img_tag = item.select_one("img")
-                    img_url = urljoin(url, img_tag["src"]) if img_tag and img_tag.get("src") else ""
+                    img_url = clean_image_url(img_tag, url)
 
                     item_text = item.get_text()
                     is_sold_out = 1 if ("SOLD OUT" in item_text.upper() or "売り切れ" in item_text) else 0
@@ -186,18 +187,10 @@ def check_product_updates(initial_run):
                         cursor.execute("UPDATE products SET is_sold_out = ?, price = ?, updated_at = CURRENT_TIMESTAMP WHERE url = ?",
                                        (is_sold_out, price, item_url))
 
-                    items_in_page += 1
-
-                print(f"   └ 検出: {items_in_page} 件（うち新規URL: {new_urls_in_this_page} 件）")
-
-                # 新しい商品が1件も増えなかった場合（最終ページ超過）は巡回終了
                 if new_urls_in_this_page == 0:
-                    print(f"-> 新しい商品が見つからなくなったため、ページ {page_num} で巡回を終了します。")
                     break
 
-                total_saved += items_in_page
                 page_num += 1
-
                 if page_num > 100:
                     break
 
@@ -209,7 +202,6 @@ def check_product_updates(initial_run):
         conn.close()
         browser.close()
 
-    print(f"📊 累計登録商品数: {len(all_seen_urls)} 件")
     return new_items
 
 # --- LINE通知処理 ---
@@ -238,6 +230,8 @@ def send_line_carousel(items):
                 color_code = "#1DB446"
 
             bubble = {"type": "bubble", "size": "kilo"}
+            
+            # 画像が存在する場合のみ hero セクションを追加
             if item.get("img_url"):
                 bubble["hero"] = {
                     "type": "image", "url": item["img_url"], "size": "full",
@@ -279,8 +273,84 @@ def send_line_carousel(items):
         except Exception as e:
             print(f"LINE通知エラー: {e}")
 
+# --- テスト送信専用処理 ---
+def run_live_test():
+    """実サイトからデータを取得し、見た目と直リンクテスト用にLINE送信"""
+    print("📱 実際のサイトからテスト通知用データを取得中...")
+    
+    # ブログから最新1件を取得
+    blog_res = requests.get(BLOG_URL, timeout=10)
+    blog_soup = BeautifulSoup(blog_res.text, "html.parser")
+    article = blog_soup.select_one("article, .post, .entry, .post-list-item")
+    
+    blog_item = {
+        "title": "【テスト通知】ブログ最新記事",
+        "url": BLOG_URL,
+        "img_url": "",
+        "category": "blog",
+        "status_type": "new"
+    }
+    if article:
+        a_tag = article.select_one("h1 a, h2 a, .entry-title a, a")
+        if a_tag and a_tag.get("href"):
+            blog_item["title"] = a_tag.get_text(strip=True)
+            blog_item["url"] = urljoin(BLOG_URL, a_tag["href"])
+        img_tag = article.select_one("img")
+        blog_item["img_url"] = clean_image_url(img_tag, BLOG_URL)
+
+    # 商品1ページ目から最新2件を取得
+    test_products = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(TROUT_BASE_URL, wait_until="networkidle")
+        soup = BeautifulSoup(page.content(), "html.parser")
+        
+        main_area = soup.select_one("#main, .main_content, .product_list, .item_list") or soup
+        item_links = main_area.find_all("a", href=lambda h: h and "pid=" in h)
+        
+        seen = set()
+        for link in item_links:
+            href = link.get("href")
+            full_url = urljoin(TROUT_BASE_URL, href)
+            if full_url not in seen:
+                seen.add(full_url)
+                parent = link.find_parent("li") or link.find_parent("div") or link.parent
+                
+                title = link.get_text(strip=True) or "テスト商品"
+                price_match = re.search(r"[\d,]+\s*円", parent.get_text() if parent else "")
+                price = price_match.group(0) if price_match else "1,000円"
+                
+                img_tag = parent.select_one("img") if parent else None
+                img_url = clean_image_url(img_tag, TROUT_BASE_URL)
+                
+                test_products.append({
+                    "title": title,
+                    "url": full_url,
+                    "img_url": img_url,
+                    "price": price,
+                    "category": "product",
+                    "status_type": "new" if len(test_products) == 0 else "restock"
+                })
+                if len(test_products) >= 2:
+                    break
+        browser.close()
+
+    # ブログ1件＋新入荷1件＋再入荷1件をまとめてLINEへ送る
+    test_items = [blog_item] + test_products
+    print(f"📢 以下の {len(test_items)} 件のテストカードをLINEへ送信します:")
+    for item in test_items:
+        print(f" - [{item['category']}] {item['title']} -> {item['url']} (画像: {item['img_url']})")
+        
+    send_line_carousel(test_items)
+
 # --- 実行エントリーポイント ---
 def main():
+    # 引数に --test が渡された場合はテスト送信を実行
+    if len(sys.argv) > 1 and sys.argv[1] == "--test":
+        run_live_test()
+        return
+
     print("🚀 スクレイピング処理を開始します...")
     init_db()
 

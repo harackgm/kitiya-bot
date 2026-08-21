@@ -3,7 +3,6 @@ name: Kitiya Monitor Bot
 on:
   schedule:
     # 毎日 日本時間 8:00, 12:00, 18:00 の3回実行する例（UTC指定）
-    # ※ クーロン式はお好みの間隔に変更してください
     - cron: '0 23,3,9 * * *'
   workflow_dispatch: # 手動実行用ボタンを有効化
 
@@ -37,10 +36,10 @@ jobs:
 
     - name: Run Monitor Script
       env:
-        # GitHubの "Settings" -> "Secrets and variables" -> "Actions" に設定してください
+        # GitHubの "Settings" -> "Secrets and variables" -> "Actions" に設定
         LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
         LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-      run: python kitiya_monitor.py
+      run: python kitiya_monitor.py --test
 
     # 実行後の更新されたSQLiteデータベースをキャッシュとして保存する
     - name: Save SQLite DB Cache

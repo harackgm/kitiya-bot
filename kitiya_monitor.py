@@ -9,7 +9,6 @@ from playwright.sync_api import sync_playwright
 
 # --- 設定情報 ---
 BLOG_URL = "https://www.kitiya.jp/apps/note/"
-# トラウトカテゴリー（新着順・全ページ巡回対象）
 TROUT_CAT_URL = "https://www.kitiya.jp/?mode=cate&cbid=2590067&csid=0&sort=n"
 
 DB_FILE = "kitiya_data.db"
@@ -19,7 +18,7 @@ LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
 
 def init_db():
-    """データベースの初期化"""
+    """データベースの初期化（URLと売り切れフラグを記録）"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
@@ -27,6 +26,7 @@ def init_db():
             url TEXT PRIMARY KEY,
             title TEXT,
             category TEXT,
+            is_soldout INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -34,34 +34,45 @@ def init_db():
     return conn
 
 
-def get_stored_urls(conn):
-    """DBに保存済みのURLを取得"""
+def get_stored_items(conn):
+    """DBに保存済みの全データ（URL -> is_soldout）を取得"""
     cursor = conn.cursor()
-    cursor.execute("SELECT url FROM notified_items")
-    return set(row[0] for row in cursor.fetchall())
+    cursor.execute("SELECT url, is_soldout FROM notified_items")
+    return {row[0]: row[1] for row in cursor.fetchall()}
 
 
-def save_urls(conn, items):
-    """新しく検知したURLをDBに保存"""
+def save_or_update_item(conn, item):
+    """DBの保存またはステータス更新"""
     cursor = conn.cursor()
-    for item in items:
-        cursor.execute(
-            "INSERT OR IGNORE INTO notified_items (url, title, category) VALUES (?, ?, ?)",
-            (item["url"], item["title"], item.get("category", "blog"))
-        )
+    cursor.execute("""
+        INSERT INTO notified_items (url, title, category, is_soldout)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(url) DO UPDATE SET
+            title=excluded.title,
+            is_soldout=excluded.is_soldout
+    """, (item["url"], item["title"], item.get("category", "blog"), 1 if item.get("is_soldout") else 0))
     conn.commit()
 
 
 def send_line_carousel(items):
-    """新着情報をLINEカルーセル形式で送信"""
+    """新着・再入荷情報をLINEカルーセル形式で送信"""
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
         print("LINEの設定情報（トークン/ID）が見つかりません。")
         return
 
     bubbles = []
     for item in items:
-        category_name = "【吉や】ブログ更新" if item.get("category") == "blog" else "【吉や】入荷・再入荷商品"
-        btn_label = "記事を読む" if item.get("category") == "blog" else "商品ページへ"
+        status_type = item.get("status_type", "new")
+        
+        if item.get("category") == "blog":
+            category_name = "【吉や】ブログ更新"
+            btn_label = "記事を読む"
+        elif status_type == "restock":
+            category_name = "【吉や】🔥再入荷情報！"
+            btn_label = "商品ページへ"
+        else:
+            category_name = "【吉や】✨新入荷商品"
+            btn_label = "商品ページへ"
 
         bubble = {
             "type": "bubble",
@@ -85,7 +96,7 @@ def send_line_carousel(items):
                     "type": "text",
                     "text": category_name,
                     "weight": "bold",
-                    "color": "#1DB446",
+                    "color": "#1DB446" if status_type != "restock" else "#E60012",
                     "size": "xs"
                 },
                 {
@@ -105,7 +116,7 @@ def send_line_carousel(items):
                 "type": "text",
                 "text": f"価格: {item['price']}",
                 "size": "xs",
-                "color": "#e60012",
+                "color": "#111111",
                 "weight": "bold",
                 "margin": "xs"
             })
@@ -122,7 +133,7 @@ def send_line_carousel(items):
                         "uri": item["url"]
                     },
                     "style": "primary",
-                    "color": "#00B900"
+                    "color": "#00B900" if status_type != "restock" else "#E60012"
                 }
             ]
         }
@@ -134,7 +145,7 @@ def send_line_carousel(items):
         "messages": [
             {
                 "type": "flex",
-                "altText": f"【吉や】新着更新情報（{len(items)}件）",
+                "altText": f"【吉や】更新情報（{len(items)}件）",
                 "contents": {
                     "type": "carousel",
                     "contents": bubbles
@@ -152,13 +163,13 @@ def send_line_carousel(items):
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=10)
         res.raise_for_status()
-        print(f"新着 {len(items)} 件の通知送信に成功しました！")
+        print(f"通知送信完了: {len(items)} 件")
     except Exception as e:
         print(f"LINE通知エラー: {e}")
 
 
 def scrape_blog(page):
-    """ブログ一覧のスクレイピング"""
+    """ブログ一覧の取得"""
     items = []
     try:
         page.goto(BLOG_URL, wait_until="domcontentloaded", timeout=60000)
@@ -190,18 +201,17 @@ def scrape_blog(page):
                         "title": clean_text,
                         "url": full_url,
                         "img_url": img_url,
-                        "category": "blog"
+                        "category": "blog",
+                        "is_soldout": False
                     })
     except Exception as e:
-        print(f"ブログスクレイピングエラー: {e}")
+        print(f"ブログ取得エラー: {e}")
     return items
 
 
 def scrape_products_all_pages(page):
-    """トラウトカテゴリーの全ページ（最大ページ数を自動判別）を巡回スクレイピング"""
+    """トラウトカテゴリー全ページの取得＆SOLDOUT判定"""
     all_items = []
-    
-    # まず1ページ目にアクセスして最大ページ数を取得
     first_page_url = TROUT_CAT_URL
     print(f"商品一覧 1 ページ目にアクセス中: {first_page_url}")
     
@@ -210,19 +220,18 @@ def scrape_products_all_pages(page):
         time.sleep(2)
         soup = BeautifulSoup(page.content(), "html.parser")
         
-        # ページネーションから最大ページ数を検出
+        # 総ページ数の判定（aタグのhref属性やページネーションから特定）
         max_page = 1
-        page_links = soup.find_all("a", href=re.compile(r"page=\d+"))
-        for p_link in page_links:
-            m = re.search(r"page=(\d+)", p_link["href"])
-            if m:
-                p_num = int(m.group(1))
-                if p_num > max_page:
-                    max_page = p_num
+        for a in soup.find_all("a", href=True):
+            if "page=" in a["href"]:
+                m = re.search(r"page=(\d+)", a["href"])
+                if m:
+                    p_num = int(m.group(1))
+                    if p_num > max_page:
+                        max_page = p_num
 
         print(f"検出された総ページ数: {max_page} ページ")
 
-        # 1ページ目から順番に巡回
         for current_p in range(1, max_page + 1):
             if current_p == 1:
                 p_soup = soup
@@ -230,62 +239,76 @@ def scrape_products_all_pages(page):
                 target_url = f"{TROUT_CAT_URL}&page={current_p}"
                 print(f"商品一覧 {current_p}/{max_page} ページ目を処理中...")
                 page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-                time.sleep(1.5)  # サーバー負荷軽減のウェイト
+                time.sleep(1.5)
                 p_soup = BeautifulSoup(page.content(), "html.parser")
 
-            # 商品要素の抽出
+            # 商品リンクの解析（pid=またはmode=item等のリンクを検出）
             for a_tag in p_soup.find_all("a", href=True):
                 href = a_tag["href"]
-                if "?pid=" in href:
+                if "pid=" in href:
                     full_url = urljoin("https://www.kitiya.jp/", href)
 
-                    img_tag = a_tag.find("img")
+                    # 親カード要素を特定
+                    parent = a_tag.find_parent("li") or a_tag.find_parent("td") or a_tag.find_parent("div")
+                    
+                    img_tag = a_tag.find("img") or (parent.find("img") if parent else None)
                     title = img_tag.get("alt", "") if img_tag else ""
+                    if not title and parent:
+                        title = parent.get_text(separator=" ", strip=True)
                     if not title:
                         title = a_tag.get_text(strip=True)
 
-                    if not title or len(title) < 3:
+                    if not title or len(title) < 2 or "カート" in title or "詳細" in title:
                         continue
+
+                    # 不要な文字列整形
+                    clean_title = title.split("円")[0].strip() if "円" in title else title
+                    clean_title = clean_title[:60]
 
                     img_url = ""
                     if img_tag:
-                        src = img_tag.get("src") or ""
+                        src = img_tag.get("src") or img_tag.get("data-src") or ""
                         if src:
                             img_url = urljoin("https://www.kitiya.jp/", src).replace("http://", "https://")
 
                     price = ""
-                    parent = a_tag.find_parent("li") or a_tag.find_parent("div")
+                    is_soldout = False
                     if parent:
-                        price_text = parent.get_text()
-                        if "円" in price_text:
-                            m = re.search(r'[\d,]+円', price_text)
+                        parent_text = parent.get_text()
+                        if "円" in parent_text:
+                            m = re.search(r'[\d,]+円', parent_text)
                             if m:
                                 price = m.group(0)
+                        
+                        # SOLDOUT判別
+                        if "SOLDOUT" in parent_text.upper() or "売り切れ" in parent_text or "SOLD OUT" in parent_text.upper():
+                            is_soldout = True
 
                     if not any(i["url"] == full_url for i in all_items):
                         all_items.append({
-                            "title": title[:60],
+                            "title": clean_title,
                             "url": full_url,
                             "img_url": img_url,
                             "price": price,
-                            "category": "product"
+                            "category": "product",
+                            "is_soldout": is_soldout
                         })
 
     except Exception as e:
-        print(f"商品全ページスクレイピングエラー: {e}")
+        print(f"商品全ページ取得エラー: {e}")
 
     return all_items
 
 
 def main():
     conn = init_db()
-    stored_urls = get_stored_urls(conn)
-    is_first_run = len(stored_urls) == 0
+    stored_items = get_stored_items(conn)
+    is_first_run = len(stored_items) == 0
 
     if is_first_run:
-        print("【初回実行】DBが空のため全商品・全ブログ記事の初回登録を行います（LINE通知はスキップ）。")
+        print("【初回実行】DBが空のため全登録を行います（通知はスキップ）。")
 
-    print("ブラウザを起動して『入荷ブログ』および『トラウト全商品ページ』へアクセス中...")
+    print("ブラウザを起動してアクセス開始...")
 
     all_scraped_items = []
 
@@ -298,30 +321,52 @@ def main():
         )
         page = context.new_page()
 
-        # 1. ブログ記事取得
+        # 1. ブログ取得
         blog_items = scrape_blog(page)
-        print(f"ブログから {len(blog_items)} 件取得")
+        print(f"ブログ: {len(blog_items)} 件")
         all_scraped_items.extend(blog_items)
 
-        # 2. トラウト全ページ取得
+        # 2. 商品取得
         product_items = scrape_products_all_pages(page)
-        print(f"トラウト全ページから {len(product_items)} 件の商品を取得")
+        print(f"商品全ページ: {len(product_items)} 件")
         all_scraped_items.extend(product_items)
 
         browser.close()
 
-    print(f"合計 {len(all_scraped_items)} 件のデータをデータベースと照合します。")
+    print(f"全 {len(all_scraped_items)} 件のスクレイピングが完了。")
 
     if is_first_run:
-        save_urls(conn, all_scraped_items)
-        print(f"初回処理完了: {len(all_scraped_items)} 件のURLをDBに一括保存しました（LINE通知はスキップ）。")
+        for item in all_scraped_items:
+            save_or_update_item(conn, item)
+        print(f"初回登録完了: {len(all_scraped_items)} 件をDB保存しました。")
     else:
-        new_items = [item for item in all_scraped_items if item["url"] not in stored_urls]
+        notify_items = []
 
-        if new_items:
-            print(f"新着更新を {len(new_items)} 件検出しました！")
-            send_line_carousel(new_items[:10])
-            save_urls(conn, new_items)
+        for item in all_scraped_items:
+            url = item["url"]
+            is_soldout = item["is_soldout"]
+
+            # 新規追加商品
+            if url not in stored_items:
+                if not is_soldout:  # 在庫がある新着商品のみ通知
+                    item["status_type"] = "new"
+                    notify_items.append(item)
+                save_or_update_item(conn, item)
+            else:
+                # 既存商品：前回SOLDOUT(1)で今回在庫あり(0)へ変化した場合は再入荷！
+                prev_soldout = stored_items[url]
+                if prev_soldout == 1 and not is_soldout:
+                    print(f"🔥 再入荷検知: {item['title']}")
+                    item["status_type"] = "restock"
+                    notify_items.append(item)
+                    save_or_update_item(conn, item)
+                elif prev_soldout != (1 if is_soldout else 0):
+                    # ステータス変化のみDBを更新
+                    save_or_update_item(conn, item)
+
+        if notify_items:
+            print(f"通知対象: {len(notify_items)} 件")
+            send_line_carousel(notify_items[:10])
         else:
             print("新着・再入荷の更新はありませんでした。")
 

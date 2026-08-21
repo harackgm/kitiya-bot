@@ -104,18 +104,23 @@ def check_product_updates(initial_run):
         cursor = conn.cursor()
 
         while True:
-            url = f"{TROUT_BASE_URL}&page={page_num}"
+            # いただいた情報をもとに、1ページ目と2ページ目以降でURLの作り方を分岐
+            if page_num == 1:
+                url = TROUT_BASE_URL
+            else:
+                url = f"{TROUT_BASE_URL}&page={page_num}"
+                
             try:
-                print(f"ページ {page_num} を巡回中...")
+                print(f"ページ {page_num} を巡回中... ({url})")
                 page.goto(url, wait_until="networkidle")
                 soup = BeautifulSoup(page.content(), "html.parser")
 
                 # クラス名による抽出
                 product_list = soup.select(".product_list li, .item_box, .product_item, .product-list-item, li.item, .item_list li")
 
-                # セレクター不一致時の自動フォールバック（mode=itemリンクを持つ要素を取得）
+                # セレクター不一致時の自動フォールバック（カラーミーショップ仕様の「pid=」リンクを探す）
                 if not product_list:
-                    item_links = soup.find_all("a", href=lambda h: h and "mode=item" in h)
+                    item_links = soup.find_all("a", href=lambda h: h and "pid=" in h)
                     seen_urls = set()
                     containers = []
                     for link in item_links:
@@ -123,7 +128,8 @@ def check_product_updates(initial_run):
                         full_url = urljoin(url, href)
                         if full_url not in seen_urls:
                             seen_urls.add(full_url)
-                            parent = link.find_parent(["li", "div", "td"])
+                            # リンクを囲んでいる親要素（liなど）を取得
+                            parent = link.find_parent("li") or link.find_parent("div") or link.parent
                             if parent and parent not in containers:
                                 containers.append(parent)
                     product_list = containers
@@ -134,7 +140,8 @@ def check_product_updates(initial_run):
 
                 items_in_page = 0
                 for item in product_list:
-                    a_tag = item.find("a", href=lambda h: h and "mode=item" in h) or item.select_one("a")
+                    # 商品リンク（pid=）を持つaタグを取得
+                    a_tag = item.find("a", href=lambda h: h and "pid=" in h) or item.select_one("a")
                     if not a_tag or not a_tag.get("href"):
                         continue
 
@@ -193,6 +200,7 @@ def check_product_updates(initial_run):
                 print(f"   └ {items_in_page} 件取得")
                 page_num += 1
 
+                # 現在は37ページとのことなので、最大100ページまで余裕を持たせてループ上限を設定
                 if page_num > 100:
                     break
 

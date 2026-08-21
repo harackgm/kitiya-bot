@@ -2,6 +2,7 @@ import os
 import requests
 import time
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 from playwright.sync_api import sync_playwright
 
 # --- 設定情報 ---
@@ -66,25 +67,33 @@ def main():
     soup = BeautifulSoup(html, "html.parser")
     current_items = []
 
-    # HP上で現在掲載されている商品要素を取得
-    for element in soup.find_all(["div", "td", "p", "li"], string=lambda t: t and "円" in t):
-        parent = element.parent
-        full_text = parent.get_text(separator=" ", strip=True)
+    # 商品リンクを含む要素を探して商品名・価格・URLを取得
+    for a_tag in soup.find_all("a", href=True):
+        text = a_tag.get_text(separator=" ", strip=True)
+        
+        # 金額（円）が含まれるリンク要素を抽出
+        if "円" in text and len(text) > 5 and len(text) < 200:
+            link_url = urljoin(TARGET_URL, a_tag["href"])
+            
+            # 重複防止
+            if not any(item["url"] == link_url for item in current_items):
+                current_items.append({
+                    "info": text,
+                    "url": link_url
+                })
 
-        if len(full_text) < 150 and "カート" not in full_text:
-            if full_text not in current_items:
-                current_items.append(full_text)
-
-    print(f"現在HPから {len(current_items)} 件を取得しました。")
+    print(f"現在HPから {len(current_items)} 件の商品情報を取得しました。")
 
     if current_items:
-        # 最新10件を1つのテキストメッセージに整形
-        msg = "【吉や】現在掲載中の最新10件\n"
-        msg += "------------------------\n"
-        for i, item in enumerate(current_items[:10], 1):
-            msg += f"{i}. {item}\n"
-        msg += "------------------------\n"
-        msg += f"▼HPで確認\n{TARGET_URL}"
+        # 件数を3件に変更
+        msg = "【吉や】現在掲載中の最新3件\n"
+        msg += "========================\n\n"
+        
+        for i, item in enumerate(current_items[:3], 1):
+            msg += f"■ {i}. {item['info']}\n"
+            msg += f"🔗 {item['url']}\n\n"
+            
+        msg += "========================"
 
         send_line_text(msg)
     else:

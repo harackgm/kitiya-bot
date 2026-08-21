@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import requests
+import re
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
@@ -63,7 +64,7 @@ def check_blog_updates(initial_run):
         cursor = conn.cursor()
 
         articles = soup.select("article, .post-list-item, .entry")
-        for article in articles[:10]:  # 最新10件を確認
+        for article in articles[:10]:
             title_tag = article.select_one("h2 a, .entry-title a, a")
             if not title_tag or not title_tag.get("href"):
                 continue
@@ -76,7 +77,6 @@ def check_blog_updates(initial_run):
             cursor.execute("SELECT url FROM blog_posts WHERE url = ?", (url,))
             if not cursor.fetchone():
                 cursor.execute("INSERT INTO blog_posts (url, title) VALUES (?, ?)", (url, title))
-                # 初回実行でなければ通知リストに追加
                 if not initial_run:
                     new_items.append({
                         "title": title, "url": url, "img_url": img_url,
@@ -94,6 +94,7 @@ def check_product_updates(initial_run):
     """商品ページの全ページ更新チェック（Playwright使用）"""
     new_items = []
     page_num = 1
+    total_saved = 0
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -103,43 +104,71 @@ def check_product_updates(initial_run):
         cursor = conn.cursor()
 
         while True:
-            # &page=1, 2, 3... と連番でアクセス
             url = f"{TROUT_BASE_URL}&page={page_num}"
             try:
                 print(f"ページ {page_num} を巡回中...")
                 page.goto(url, wait_until="networkidle")
                 soup = BeautifulSoup(page.content(), "html.parser")
 
-                product_list = soup.select(".product_item, .product-list-item, li.item")
+                # クラス名による抽出
+                product_list = soup.select(".product_list li, .item_box, .product_item, .product-list-item, li.item, .item_list li")
+
+                # セレクター不一致時の自動フォールバック（mode=itemリンクを持つ要素を取得）
                 if not product_list:
-                    print(f"-> ページ {page_num} に商品が見当たりません。巡回を終了します。")
+                    item_links = soup.find_all("a", href=lambda h: h and "mode=item" in h)
+                    seen_urls = set()
+                    containers = []
+                    for link in item_links:
+                        href = link.get("href")
+                        full_url = urljoin(url, href)
+                        if full_url not in seen_urls:
+                            seen_urls.add(full_url)
+                            parent = link.find_parent(["li", "div", "td"])
+                            if parent and parent not in containers:
+                                containers.append(parent)
+                    product_list = containers
+
+                if not product_list:
+                    print(f"-> ページ {page_num} に商品が見当たりません。全ページの巡回を終了します。")
                     break
 
+                items_in_page = 0
                 for item in product_list:
-                    title_tag = item.select_one(".product_name, .name a, a")
-                    if not title_tag:
+                    a_tag = item.find("a", href=lambda h: h and "mode=item" in h) or item.select_one("a")
+                    if not a_tag or not a_tag.get("href"):
                         continue
 
-                    title = title_tag.get_text(strip=True)
-                    item_url = urljoin(url, title_tag.get("href") if title_tag.name == "a" else "")
-                    if not item_url or item_url == url:
-                        a_tag = item.select_one("a")
-                        if a_tag: item_url = urljoin(url, a_tag["href"])
+                    item_url = urljoin(url, a_tag["href"])
 
-                    price_tag = item.select_one(".product_price, .price")
-                    price = price_tag.get_text(strip=True) if price_tag else "価格不詳"
+                    # タイトル取得
+                    title = a_tag.get_text(strip=True)
+                    if not title:
+                        img_in_a = a_tag.select_one("img")
+                        if img_in_a and img_in_a.get("alt"):
+                            title = img_in_a["alt"]
+                    if not title:
+                        title_elem = item.select_one(".product_name, .name, h2, h3")
+                        if title_elem:
+                            title = title_elem.get_text(strip=True)
+                    if not title:
+                        continue
 
+                    # 価格取得
+                    price_match = re.search(r"[\d,]+\s*円", item.get_text())
+                    price = price_match.group(0) if price_match else "価格不詳"
+
+                    # 画像取得
                     img_tag = item.select_one("img")
                     img_url = urljoin(url, img_tag["src"]) if img_tag and img_tag.get("src") else ""
 
+                    # 売り切れ判定
                     item_text = item.get_text()
-                    is_sold_out = 1 if "SOLD OUT" in item_text.upper() else 0
+                    is_sold_out = 1 if ("SOLD OUT" in item_text.upper() or "売り切れ" in item_text) else 0
 
                     cursor.execute("SELECT is_sold_out FROM products WHERE url = ?", (item_url,))
                     row = cursor.fetchone()
 
                     if row is None:
-                        # 新規商品
                         cursor.execute("INSERT INTO products (url, title, price, is_sold_out) VALUES (?, ?, ?, ?)",
                                        (item_url, title, price, is_sold_out))
                         if not initial_run and not is_sold_out:
@@ -148,7 +177,6 @@ def check_product_updates(initial_run):
                                 "price": price, "category": "product", "status_type": "new"
                             })
                     else:
-                        # 既存商品（状態更新チェック）
                         old_sold_out = row[0]
                         if old_sold_out == 1 and is_sold_out == 0:
                             if not initial_run:
@@ -159,12 +187,15 @@ def check_product_updates(initial_run):
                         cursor.execute("UPDATE products SET is_sold_out = ?, price = ?, updated_at = CURRENT_TIMESTAMP WHERE url = ?",
                                        (is_sold_out, price, item_url))
 
+                    items_in_page += 1
+
+                total_saved += items_in_page
+                print(f"   └ {items_in_page} 件取得")
                 page_num += 1
-                
-                # 無限ループ防止の安全装置（37ページ以上を考慮し最大100ページまで）
+
                 if page_num > 100:
                     break
-                    
+
             except Exception as e:
                 print(f"商品スクレイピングエラー（ページ {page_num}）: {e}")
                 break
@@ -173,6 +204,7 @@ def check_product_updates(initial_run):
         conn.close()
         browser.close()
 
+    print(f"📊 累計登録商品数: {total_saved} 件")
     return new_items
 
 # --- LINE通知処理 ---
@@ -246,7 +278,7 @@ def send_line_carousel(items):
 def main():
     print("🚀 スクレイピング処理を開始します...")
     init_db()
-    
+
     initial_run = is_initial_run()
     if initial_run:
         print("ℹ️ 初回実行を検知しました。データベースの構築のみ行い、LINE通知はスキップします。")

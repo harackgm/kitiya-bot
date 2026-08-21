@@ -95,6 +95,7 @@ def check_product_updates(initial_run):
     new_items = []
     page_num = 1
     total_saved = 0
+    all_seen_urls = set()  # 今回の実行で巡回した全商品URLの記録
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -104,7 +105,6 @@ def check_product_updates(initial_run):
         cursor = conn.cursor()
 
         while True:
-            # いただいた情報をもとに、1ページ目と2ページ目以降でURLの作り方を分岐
             if page_num == 1:
                 url = TROUT_BASE_URL
             else:
@@ -115,39 +115,34 @@ def check_product_updates(initial_run):
                 page.goto(url, wait_until="networkidle")
                 soup = BeautifulSoup(page.content(), "html.parser")
 
-                # クラス名による抽出
-                product_list = soup.select(".product_list li, .item_box, .product_item, .product-list-item, li.item, .item_list li")
+                # メインエリア優先で商品枠を取得
+                main_area = soup.select_one("#main, .main_content, .product_list, .item_list") or soup
+                product_list = main_area.select(".product_item, .item_box, li.item, .product_list li, .item_list li")
 
-                # セレクター不一致時の自動フォールバック（カラーミーショップ仕様の「pid=」リンクを探す）
                 if not product_list:
-                    item_links = soup.find_all("a", href=lambda h: h and "pid=" in h)
-                    seen_urls = set()
+                    item_links = main_area.find_all("a", href=lambda h: h and "pid=" in h)
                     containers = []
                     for link in item_links:
-                        href = link.get("href")
-                        full_url = urljoin(url, href)
-                        if full_url not in seen_urls:
-                            seen_urls.add(full_url)
-                            # リンクを囲んでいる親要素（liなど）を取得
-                            parent = link.find_parent("li") or link.find_parent("div") or link.parent
-                            if parent and parent not in containers:
-                                containers.append(parent)
+                        parent = link.find_parent("li") or link.find_parent("div") or link.parent
+                        if parent and parent not in containers:
+                            containers.append(parent)
                     product_list = containers
 
-                if not product_list:
-                    print(f"-> ページ {page_num} に商品が見当たりません。全ページの巡回を終了します。")
-                    break
-
+                new_urls_in_this_page = 0
                 items_in_page = 0
+
                 for item in product_list:
-                    # 商品リンク（pid=）を持つaタグを取得
                     a_tag = item.find("a", href=lambda h: h and "pid=" in h) or item.select_one("a")
                     if not a_tag or not a_tag.get("href"):
                         continue
 
                     item_url = urljoin(url, a_tag["href"])
 
-                    # タイトル取得
+                    # このページで未登録のURLかチェック
+                    if item_url not in all_seen_urls:
+                        all_seen_urls.add(item_url)
+                        new_urls_in_this_page += 1
+
                     title = a_tag.get_text(strip=True)
                     if not title:
                         img_in_a = a_tag.select_one("img")
@@ -160,15 +155,12 @@ def check_product_updates(initial_run):
                     if not title:
                         continue
 
-                    # 価格取得
                     price_match = re.search(r"[\d,]+\s*円", item.get_text())
                     price = price_match.group(0) if price_match else "価格不詳"
 
-                    # 画像取得
                     img_tag = item.select_one("img")
                     img_url = urljoin(url, img_tag["src"]) if img_tag and img_tag.get("src") else ""
 
-                    # 売り切れ判定
                     item_text = item.get_text()
                     is_sold_out = 1 if ("SOLD OUT" in item_text.upper() or "売り切れ" in item_text) else 0
 
@@ -196,11 +188,16 @@ def check_product_updates(initial_run):
 
                     items_in_page += 1
 
+                print(f"   └ 検出: {items_in_page} 件（うち新規URL: {new_urls_in_this_page} 件）")
+
+                # 新しい商品が1件も増えなかった場合（最終ページ超過）は巡回終了
+                if new_urls_in_this_page == 0:
+                    print(f"-> 新しい商品が見つからなくなったため、ページ {page_num} で巡回を終了します。")
+                    break
+
                 total_saved += items_in_page
-                print(f"   └ {items_in_page} 件取得")
                 page_num += 1
 
-                # 現在は37ページとのことなので、最大100ページまで余裕を持たせてループ上限を設定
                 if page_num > 100:
                     break
 
@@ -212,7 +209,7 @@ def check_product_updates(initial_run):
         conn.close()
         browser.close()
 
-    print(f"📊 累計登録商品数: {total_saved} 件")
+    print(f"📊 累計登録商品数: {len(all_seen_urls)} 件")
     return new_items
 
 # --- LINE通知処理 ---

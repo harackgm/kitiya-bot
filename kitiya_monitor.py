@@ -71,7 +71,7 @@ def clean_image_url(img_tag, base_url):
     return full_url
 
 def clean_title_text(text_or_elem):
-    """HTMLタグ、New Arrivalsなどのマーク文字、改行を完全に除去"""
+    """HTMLタグ、New Arrivals、SNSなどのマーク文字、改行を完全に除去"""
     if not text_or_elem:
         return ""
     
@@ -88,7 +88,7 @@ def clean_title_text(text_or_elem):
     text = re.sub(r'<[^>]+>', '', text)
     
     # 不要なマーク文言や日時表記の消去
-    text = re.sub(r'^(New\s*Arrivals|Re\s*Arrivals|新入荷|再入荷|SALE|新色)\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^(New\s*Arrivals|Re\s*Arrivals|新入荷|再入荷|SALE|新色|SNS)\s*', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
@@ -205,7 +205,12 @@ def scrape_kitiya():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        # 日本語環境を明示指定してコンテキスト作成
+        context = browser.new_context(
+            locale="ja-JP",
+            extra_http_headers={"Accept-Language": "ja,ja-JP;q=0.9,en-US;q=0.8,en;q=0.7"}
+        )
+        page = context.new_page()
 
         # 1. ブログ更新の監視（URLパターン直接検索）
         try:
@@ -283,6 +288,7 @@ def scrape_kitiya():
         except Exception as e:
             print(f"商品取得エラー: {e}")
 
+        context.close()
         browser.close()
 
     if new_items_to_notify:

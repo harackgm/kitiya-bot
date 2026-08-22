@@ -254,7 +254,7 @@ def scrape_kitiya():
         except Exception as e:
             print(f"ブログ取得エラー: {e}")
 
-        # 2. トラウト商品の監視（新入荷 / 再入荷判別機能つき）
+        # 2. トラウト商品の監視（※item_idは既存DBの形式 f"trout_{url}" に固定）
         try:
             page.goto(TROUT_BASE_URL, wait_until="domcontentloaded", timeout=30000)
             soup = BeautifulSoup(page.content(), "html.parser")
@@ -273,12 +273,13 @@ def scrape_kitiya():
                 url = urljoin(TROUT_BASE_URL, link.get("href"))
                 title = clean_title_text(link)
 
-                # 再入荷マーク（icons4.gif や Re Arrivals などのテキスト）を検出
+                # 再入荷判定（色分け用データ）
                 parent_html = str(parent) if parent else ""
                 is_restock = "再入荷" in parent_html or "Re Arrivals" in parent_html or "icons4.gif" in parent_html
                 item_type = "restock" if is_restock else "new"
 
-                item_id = f"trout_{item_type}_{url}"
+                # 【重要】DBキーは元通りの形式に戻し、既存DBと正常照合させる
+                item_id = f"trout_{url}"
 
                 price_elem = parent.select_one(".price, .product_price, .item_price") if parent else None
                 price = price_elem.get_text(strip=True) if price_elem else ""

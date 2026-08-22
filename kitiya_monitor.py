@@ -205,19 +205,17 @@ def scrape_kitiya():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # 日本語環境を明示指定してコンテキスト作成
         context = browser.new_context(
             locale="ja-JP",
             extra_http_headers={"Accept-Language": "ja,ja-JP;q=0.9,en-US;q=0.8,en;q=0.7"}
         )
         page = context.new_page()
 
-        # 1. ブログ更新の監視（URLパターン直接検索）
+        # 1. ブログ更新の監視
         try:
-            page.goto(BLOG_URL, wait_until="networkidle")
+            page.goto(BLOG_URL, wait_until="domcontentloaded", timeout=30000)
             soup = BeautifulSoup(page.content(), "html.parser")
             
-            # /apps/note/archives/数字 のリンクを持つaタグを直接抽出
             blog_links = soup.find_all("a", href=re.compile(r"/apps/note/archives/\d+"))
             
             seen_urls = set()
@@ -227,7 +225,6 @@ def scrape_kitiya():
                     continue
                 seen_urls.add(url)
 
-                # カード全体の親要素またはaタグ自体からタイトルを取得
                 parent = a_tag.find_parent("article") or a_tag.find_parent("div") or a_tag
                 title = clean_title_text(a_tag.get_text(strip=True) or parent.get_text(strip=True))
 
@@ -254,7 +251,7 @@ def scrape_kitiya():
 
         # 2. トラウト商品の監視
         try:
-            page.goto(TROUT_BASE_URL, wait_until="networkidle")
+            page.goto(TROUT_BASE_URL, wait_until="domcontentloaded", timeout=30000)
             soup = BeautifulSoup(page.content(), "html.parser")
             
             all_pid_links = soup.find_all("a", href=lambda h: h and "pid=" in h)

@@ -12,7 +12,7 @@ BLOG_URL = "https://www.kitiya.jp/apps/note/"
 TROUT_BASE_URL = "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n"
 DB_FILE = "kitiya_data.db"
 
-# 吉やのロゴマーク（カード右上に表示）
+# 吉やのロゴマーク
 KITIYA_LOGO_URL = "https://www.kitiya.jp/apps/note/wp-content/uploads/2023/01/cropped-logo-192x192.png"
 
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "")
@@ -20,7 +20,6 @@ LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
 # --- ヘルパー関数 ---
 def clean_image_url(img_tag, base_url):
-    """遅延読み込み(Lazy Load)に対応して正しい画像URLを取得"""
     if not img_tag:
         return ""
     src = img_tag.get("data-src") or img_tag.get("data-original") or img_tag.get("src") or ""
@@ -33,7 +32,6 @@ def clean_image_url(img_tag, base_url):
     return full_url
 
 def fetch_blog_og_image(article_url):
-    """個別記事ページからOGP画像(アイキャッチ画像)を取得"""
     try:
         res = requests.get(article_url, timeout=10)
         res.raise_for_status()
@@ -56,9 +54,7 @@ def fetch_blog_og_image(article_url):
     return ""
 
 def extract_blog_item(article, base_url):
-    """記事要素から個別記事のURL(/archives/XXXX)・タイトル・画像を取得"""
     a_tag = None
-    # /archives/ を含むリンクを最優先取得
     a_tags = article.find_all("a", href=lambda h: h and "archives/" in h)
     if a_tags:
         a_tag = a_tags[0]
@@ -196,7 +192,10 @@ def check_product_updates(initial_run=False):
                         all_seen_urls.add(item_url)
                         new_urls_in_this_page += 1
 
+                    # タイトル取得＆HTMLタグ除去処理（強化版）
                     title = a_tag.get_text(strip=True)
+                    title = re.sub(r'<[^>]+>', '', title)
+
                     if not title:
                         img_in_a = a_tag.select_one("img")
                         if img_in_a and img_in_a.get("alt"):
@@ -205,6 +204,7 @@ def check_product_updates(initial_run=False):
                         title_elem = item.select_one(".product_name, .name, h2, h3")
                         if title_elem:
                             title = title_elem.get_text(strip=True)
+                            title = re.sub(r'<[^>]+>', '', title)
                     if not title:
                         continue
 
@@ -217,7 +217,6 @@ def check_product_updates(initial_run=False):
                     item_text = item.get_text()
                     is_sold_out = 1 if ("SOLD OUT" in item_text.upper() or "売り切れ" in item_text) else 0
 
-                    # 属性の自動判定（新色・特価品・新入荷）
                     status_type = "new"
                     if "新色" in title:
                         status_type = "new_color"
@@ -263,10 +262,10 @@ def check_product_updates(initial_run=False):
 
     return new_items
 
-# --- LINE通知処理（5色テーマカラー対応） ---
+# --- LINE通知処理 ---
 def send_line_carousel(items):
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
-        print("LINEの設定情報（トークン/ID）が見つかりません。")
+        print("LINEの設定情報が見つかりません。")
         return
     if not items:
         return
@@ -279,27 +278,26 @@ def send_line_carousel(items):
         for item in chunk:
             status_type = item.get("status_type", "new")
             
-            # 5種類のテーマカラー・タイトル・ボタン設定
             if item.get("category") == "blog" or status_type == "blog":
                 category_name = "【吉や】ブログ更新"
                 btn_label = "記事を読む"
-                color_code = "#00B900"  # LINEグリーン
+                color_code = "#00B900"
             elif status_type == "new_color":
                 category_name = "【吉や】🎨新色入荷！"
                 btn_label = "商品ページへ"
-                color_code = "#007AFF"  # ディープブルー
+                color_code = "#007AFF"
             elif status_type == "bargain":
                 category_name = "【吉や】🉐特価品入荷！"
                 btn_label = "商品ページへ"
-                color_code = "#FF007F"  # ネオンピンク
+                color_code = "#FF007F"
             elif status_type == "restock":
                 category_name = "【吉や】🔥再入荷情報！"
                 btn_label = "商品ページへ"
-                color_code = "#E69D00"  # アンバーオレンジ
-            else: # 新入荷（標準）
+                color_code = "#E69D00"
+            else:
                 category_name = "【吉や】✨新入荷商品"
                 btn_label = "商品ページへ"
-                color_code = "#E60012"  # ビビッドレッド
+                color_code = "#E60012"
 
             bubble = {
                 "type": "bubble",

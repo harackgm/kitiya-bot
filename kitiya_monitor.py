@@ -49,7 +49,7 @@ def clean_title_text(text_or_elem):
     return text
 
 def test_scrape_and_print_titles():
-    """1ページ目だけ取得して抽出した商品名をログに表示するテスト関数"""
+    """商品一覧ページから正確に商品のみを取得してログ表示するテスト関数"""
     print("--- [商品名クレンジング確認テスト開始] ---")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -57,32 +57,35 @@ def test_scrape_and_print_titles():
         page.goto(TROUT_BASE_URL, wait_until="networkidle")
         soup = BeautifulSoup(page.content(), "html.parser")
 
-        main_area = soup.select_one("#main, .main_content, .product_list, .item_list") or soup
-        product_list = main_area.select(".product_item, .item_box, li.item, .product_list li, .item_list li")
+        # 1. pid= を含む商品詳細リンクをすべて抽出
+        all_pid_links = soup.find_all("a", href=lambda h: h and "pid=" in h)
+        
+        # 2. 親要素から商品枠を特定してカテゴリリンクを除外
+        items_found = []
+        for link in all_pid_links:
+            title_text = clean_title_text(link)
+            # 文字数が極端に短いものや画像のみのリンクをスキップ
+            if not title_text or len(title_text) < 2:
+                continue
+            
+            # 親要素を取得して重複防止
+            parent = link.find_parent("li") or link.find_parent("div")
+            if parent and parent not in items_found:
+                items_found.append((link, parent))
 
-        if not product_list:
-            item_links = main_area.find_all("a", href=lambda h: h and "pid=" in h)
-            containers = []
-            for link in item_links:
-                parent = link.find_parent("li") or link.find_parent("div") or link.parent
-                if parent and parent not in containers:
-                    containers.append(parent)
-            product_list = containers
+        # 3. 取得した商品（先頭5件）を表示
+        for idx, (a_tag, parent) in enumerate(items_found[:5], 1):
+            raw_title = a_tag.get_text(strip=True)
+            cleaned_title = clean_title_text(a_tag)
+            print(f"商品{idx}:")
+            print(f"  [修正前]: {raw_title[:60]}")
+            print(f"  [修正後]: {cleaned_title}")
+            print("-" * 40)
 
-        for idx, item in enumerate(product_list[:5], 1):
-            a_tag = item.find("a", href=lambda h: h and "pid=" in h) or item.select_one("a")
-            if a_tag:
-                raw_title = a_tag.get_text(strip=True)
-                cleaned_title = clean_title_text(a_tag)
-                print(f"商品{idx}:")
-                print(f"  [修正前]: {raw_title[:60]}")
-                print(f"  [修正後]: {cleaned_title}")
-                print("-" * 40)
         browser.close()
     print("--- [テスト終了] ---")
 
 def main():
-    # 最初に商品名クレンジングのテスト表示を実行
     test_scrape_and_print_titles()
 
 if __name__ == "__main__":

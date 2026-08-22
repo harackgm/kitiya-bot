@@ -83,19 +83,16 @@ def is_initial_run():
     conn.close()
     return (p_count == 0 and b_count == 0)
 
-# --- ブログスクレイピング処理（月別アーカイブ対応版） ---
+# --- ブログスクレイピング処理 ---
 def check_blog_updates(initial_run=False):
     new_items = []
     
-    # 当月のアーカイブURLを自動生成（例: https://www.kitiya.jp/apps/note/archives/date/2026/08）
     now = datetime.now()
     current_month_url = f"{BLOG_BASE_URL}archives/date/{now.strftime('%Y/%m')}"
-    
     urls_to_check = [current_month_url, BLOG_BASE_URL]
     
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-
     seen_urls = set()
 
     for target_url in urls_to_check:
@@ -106,8 +103,6 @@ def check_blog_updates(initial_run=False):
                 continue
             
             soup = BeautifulSoup(response.text, "html.parser")
-
-            # 個別記事ページ（/archives/数字）へのリンクをすべて検出
             a_tags = soup.find_all("a", href=lambda h: h and re.search(r'/archives/\d+', h))
             
             for a in a_tags:
@@ -129,24 +124,19 @@ def check_blog_updates(initial_run=False):
                 if not title:
                     title = "【吉や】ブログ最新記事"
 
-                # DBの存在チェック
                 cursor.execute("SELECT url FROM blog_posts WHERE url = ?", (full_url,))
                 if not cursor.fetchone():
-                    # アイキャッチ画像を個別記事ページから取得
                     img_url = fetch_blog_og_image(full_url)
-
                     cursor.execute("INSERT INTO blog_posts (url, title) VALUES (?, ?)", (full_url, title))
                     
-                    blog_item = {
-                        "title": title,
-                        "url": full_url,
-                        "img_url": img_url,
-                        "category": "blog",
-                        "status_type": "new"
-                    }
-                    
                     if not initial_run:
-                        new_items.append(blog_item)
+                        new_items.append({
+                            "title": title,
+                            "url": full_url,
+                            "img_url": img_url,
+                            "category": "blog",
+                            "status_type": "blog"
+                        })
 
         except Exception as e:
             print(f"ブログスクレイピングエラー ({target_url}): {e}")
@@ -174,6 +164,10 @@ def check_product_updates(initial_run=False):
             try:
                 print(f"商品ページ {page_num} を巡回中...")
                 page.goto(url, wait_until="networkidle")
+                
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(1000)
+
                 soup = BeautifulSoup(page.content(), "html.parser")
 
                 main_area = soup.select_one("#main, .main_content, .product_list, .item_list") or soup
@@ -219,8 +213,20 @@ def check_product_updates(initial_run=False):
                     img_tag = item.select_one("img")
                     img_url = clean_image_url(img_tag, url)
 
+                    # 売り切れ判定（完売バッジのみを検知）
+                    is_sold_out = 0
+                    sold_out_elem = item.select_one(".sold_out, .soldout, .is-soldout")
+                    sold_out_img = item.select_one("img[src*='sold'], img[alt*='SOLD'], img[alt*='売り切れ']")
+                    if sold_out_elem or sold_out_img:
+                        is_sold_out = 1
+
+                    # バッジ（新色・特価・新入荷）の判定
                     item_text = item.get_text()
-                    is_sold_out = 1 if ("SOLD OUT" in item_text.upper() or "売り切れ" in item_text) else 0
+                    status_type = "new"
+                    if "新色" in item_text:
+                        status_type = "new_color"
+                    elif "特価" in item_text:
+                        status_type = "bargain"
 
                     cursor.execute("SELECT is_sold_out FROM products WHERE url = ?", (item_url,))
                     row = cursor.fetchone()
@@ -231,7 +237,7 @@ def check_product_updates(initial_run=False):
                         if not initial_run and not is_sold_out:
                             new_items.append({
                                 "title": title, "url": item_url, "img_url": img_url,
-                                "price": price, "category": "product", "status_type": "new"
+                                "price": price, "category": "product", "status_type": status_type
                             })
                     else:
                         old_sold_out = row[0]
@@ -264,7 +270,7 @@ def check_product_updates(initial_run=False):
 # --- LINE通知処理 ---
 def send_line_carousel(items):
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
-        print("LINEの設定情報（トークン/ID）が見つかりません。")
+        print("LINEの設定情報が見つかりません。")
         return
     if not items:
         return
@@ -280,15 +286,23 @@ def send_line_carousel(items):
             if item.get("category") == "blog":
                 category_name = "【吉や】ブログ更新"
                 btn_label = "記事を読む"
-                color_code = "#00B900"
+                color_code = "#00B900" # LINEグリーン
+            elif status_type == "new_color":
+                category_name = "【吉や】🎨新色入荷！"
+                btn_label = "商品ページへ"
+                color_code = "#007AFF" # ブルー（新色）
+            elif status_type == "bargain":
+                category_name = "【吉や】🉐特価品入荷！"
+                btn_label = "商品ページへ"
+                color_code = "#FF007F" # ネオンピンク（特価）
             elif status_type == "restock":
                 category_name = "【吉や】🔥再入荷情報！"
                 btn_label = "商品ページへ"
-                color_code = "#E69D00"
+                color_code = "#E69D00" # オレンジ（再入荷）
             else:
                 category_name = "【吉や】✨新入荷商品"
                 btn_label = "商品ページへ"
-                color_code = "#E60012"
+                color_code = "#E60012" # レッド（新入荷）
 
             bubble = {
                 "type": "bubble",

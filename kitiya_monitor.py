@@ -83,7 +83,7 @@ def clean_title_text(text_or_elem):
     else:
         text = str(text_or_elem)
 
-    # HTMLタグ・文字列消去
+    # HTMLタグ・文字列消去（<img...>タグも文字として残らないよう強力除去）
     text = re.sub(r'<img[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'<[^>]+>', '', text)
     
@@ -103,7 +103,6 @@ def send_line_flex_messages(items):
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
     }
 
-    # 10件ずつバブルメッセージを束ねて送信
     chunk_size = 10
     for i in range(0, len(items), chunk_size):
         chunk = items[i:i + chunk_size]
@@ -111,13 +110,21 @@ def send_line_flex_messages(items):
 
         for item in chunk:
             image_url = item['image_url'] if item['image_url'] else KITIYA_LOGO_URL
+            item_type = item.get('type', 'new')
             
-            # カテゴリ別の色分け
-            badge_color = "#E61B23"
-            tag_text = "新入荷"
+            # カテゴリ・入荷種別ごとの色分けとデザイン
             if "blog_" in item['id']:
                 badge_color = "#00B900"
-                tag_text = "ブログ更新"
+                tag_text = "【吉や】 ブログ更新"
+                btn_color = "#00B900"
+            elif item_type == "restock":
+                badge_color = "#D97706"
+                tag_text = "【吉や】 🔥再入荷情報！"
+                btn_color = "#E69900"
+            else:
+                badge_color = "#E61B23"
+                tag_text = "【吉や】 ✨新入荷"
+                btn_color = "#E61B23"
 
             bubble = {
                 "type": "bubble",
@@ -135,7 +142,7 @@ def send_line_flex_messages(items):
                     "contents": [
                         {
                             "type": "text",
-                            "text": f"【吉や】{tag_text}",
+                            "text": tag_text,
                             "weight": "bold",
                             "size": "xs",
                             "color": badge_color
@@ -165,11 +172,11 @@ def send_line_flex_messages(items):
                             "type": "button",
                             "action": {
                                 "type": "uri",
-                                "label": "ページへ",
+                                "label": "商品ページへ" if "trout_" in item['id'] else "記事を読む",
                                 "uri": item['url']
                             },
                             "style": "primary",
-                            "color": badge_color,
+                            "color": btn_color,
                             "height": "sm"
                         }
                     ]
@@ -217,7 +224,6 @@ def scrape_kitiya():
             soup = BeautifulSoup(page.content(), "html.parser")
             
             blog_links = soup.find_all("a", href=re.compile(r"/apps/note/archives/\d+"))
-            
             seen_urls = set()
             for a_tag in blog_links:
                 url = urljoin(BLOG_URL, a_tag.get("href")).rstrip("/")
@@ -238,18 +244,17 @@ def scrape_kitiya():
                 if not is_already_notified(item_id):
                     if not first_run:
                         new_items_to_notify.append({
-                            "id": item_id, "title": title, "url": url,
+                            "id": item_id, "type": "blog", "title": title, "url": url,
                             "price": "", "image_url": image_url
                         })
                     save_notified_item(item_id, title, url)
-                    print(f"検知したブログ: {title} ({url})")
                 
                 if len(seen_urls) >= 5:
                     break
         except Exception as e:
             print(f"ブログ取得エラー: {e}")
 
-        # 2. トラウト商品の監視
+        # 2. トラウト商品の監視（新入荷 / 再入荷判別機能つき）
         try:
             page.goto(TROUT_BASE_URL, wait_until="domcontentloaded", timeout=30000)
             soup = BeautifulSoup(page.content(), "html.parser")
@@ -266,19 +271,25 @@ def scrape_kitiya():
 
             for link, parent in items_found:
                 url = urljoin(TROUT_BASE_URL, link.get("href"))
-                item_id = f"trout_{url}"
                 title = clean_title_text(link)
 
-                price_elem = parent.select_one(".price, .product_price, .item_price")
+                # 再入荷マーク（icons4.gif や Re Arrivals などのテキスト）を検出
+                parent_html = str(parent) if parent else ""
+                is_restock = "再入荷" in parent_html or "Re Arrivals" in parent_html or "icons4.gif" in parent_html
+                item_type = "restock" if is_restock else "new"
+
+                item_id = f"trout_{item_type}_{url}"
+
+                price_elem = parent.select_one(".price, .product_price, .item_price") if parent else None
                 price = price_elem.get_text(strip=True) if price_elem else ""
 
-                img_tag = parent.select_one("img")
+                img_tag = parent.select_one("img") if parent else None
                 image_url = clean_image_url(img_tag, TROUT_BASE_URL)
 
                 if not is_already_notified(item_id):
                     if not first_run:
                         new_items_to_notify.append({
-                            "id": item_id, "title": title, "url": url,
+                            "id": item_id, "type": item_type, "title": title, "url": url,
                             "price": price, "image_url": image_url
                         })
                     save_notified_item(item_id, title, url)

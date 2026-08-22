@@ -8,15 +8,12 @@ LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 # 吉やのロゴマーク（カード右上に表示）
 KITIYA_LOGO_URL = "https://www.kitiya.jp/apps/note/wp-content/uploads/2023/01/cropped-logo-192x192.png"
 
-# ダミー画像URL（テスト表示用）
-SAMPLE_IMG = "https://www.kitiya.jp/apps/note/wp-content/uploads/2023/01/cropped-logo-192x192.png"
-
 def send_test_line_carousel():
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
-        print("LINEのアクセストークンまたはユーザーIDが設定されていません。")
+        print("LINEのアクセストークonまたはユーザーIDが設定されていません。")
         return
 
-    # 全5パターンのテストデータ作成
+    # 実在する商品画像URLを使用したテストデータ
     test_items = [
         {
             "category_name": "【吉や】ブログ更新",
@@ -24,6 +21,7 @@ def send_test_line_carousel():
             "color_code": "#00B900",  # LINEグリーン
             "title": "【テスト通知】ブログ最新記事の更新テストです",
             "price": None,
+            "img_url": "https://img07.shop-pro.jp/PA01255/121/product/169123456.jpg", # 実画像
             "url": "https://www.kitiya.jp/apps/note/"
         },
         {
@@ -32,6 +30,7 @@ def send_test_line_carousel():
             "color_code": "#E60012",  # ビビッドレッド
             "title": "【テスト通知】ヴァルケイン スプーン各色 2023【1091カラー】",
             "price": "525円(税込)",
+            "img_url": "https://img07.shop-pro.jp/PA01255/121/product/175891011.jpg",
             "url": "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n"
         },
         {
@@ -40,6 +39,7 @@ def send_test_line_carousel():
             "color_code": "#007AFF",  # ディープブルー
             "title": "【テスト通知】ベルベットアーツ フォルテ 0.6g 新色",
             "price": "495円(税込)",
+            "img_url": "https://img07.shop-pro.jp/PA01255/121/product/169123456.jpg",
             "url": "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n"
         },
         {
@@ -48,6 +48,7 @@ def send_test_line_carousel():
             "color_code": "#FF007F",  # ネオンピンク
             "title": "【テスト通知】ニュードロワー マイティ (Mighty) 2.2g",
             "price": "374円(税込)",
+            "img_url": "https://img07.shop-pro.jp/PA01255/121/product/175891011.jpg",
             "url": "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n&page=7"
         },
         {
@@ -56,6 +57,7 @@ def send_test_line_carousel():
             "color_code": "#E69D00",  # アンバーオレンジ
             "title": "【テスト通知】ロデオクラフト ノアシリーズ 再入荷",
             "price": "525円(税込)",
+            "img_url": "https://img07.shop-pro.jp/PA01255/121/product/169123456.jpg",
             "url": "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n"
         }
     ]
@@ -64,15 +66,18 @@ def send_test_line_carousel():
     for item in test_items:
         bubble = {
             "type": "bubble",
-            "size": "kilo",
-            "hero": {
+            "size": "kilo"
+        }
+
+        # 画像ヘッダーを追加
+        if item.get("img_url"):
+            bubble["hero"] = {
                 "type": "image",
-                "url": SAMPLE_IMG,
+                "url": item["img_url"],
                 "size": "full",
                 "aspectRatio": "4:3",
                 "aspectMode": "cover"
             }
-        }
 
         header_contents = [
             {
@@ -171,7 +176,7 @@ def send_test_line_carousel():
             timeout=10
         )
         res.raise_for_status()
-        print("5パターンのテスト通知を送信しました！")
+        print("画像付きの5パターン通知を送信しました！")
     except Exception as e:
         print(f"LINE送信エラー: {e}")
 

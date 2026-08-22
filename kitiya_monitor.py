@@ -1,4 +1,6 @@
 import os
+import sys
+import sqlite3
 import requests
 import re
 from urllib.parse import urljoin
@@ -8,25 +10,30 @@ from playwright.sync_api import sync_playwright
 # --- 設定情報 ---
 BLOG_URL = "https://www.kitiya.jp/apps/note/"
 TROUT_BASE_URL = "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n"
+DB_FILE = "kitiya_data.db"
+
+# 吉やのロゴマーク（カード右上に表示）
 KITIYA_LOGO_URL = "https://www.kitiya.jp/apps/note/wp-content/uploads/2023/01/cropped-logo-192x192.png"
 
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
-# --- 画像クレンジング関数 ---
+# --- ヘルパー関数 ---
 def clean_image_url(img_tag, base_url):
+    """遅延読み込み(Lazy Load)に対応して正しい画像URLを取得"""
     if not img_tag:
         return ""
     src = img_tag.get("data-src") or img_tag.get("data-original") or img_tag.get("src") or ""
     if not src or "blank.gif" in src or "spacer.gif" in src or "transparent" in src:
         return ""
+    
     full_url = urljoin(base_url, src)
     if full_url.startswith("http://"):
         full_url = full_url.replace("http://", "https://", 1)
     return full_url
 
 def fetch_blog_og_image(article_url):
-    """個別記事ページからアイキャッチ画像を取得"""
+    """個別記事ページからOGP画像(アイキャッチ画像)を取得"""
     try:
         res = requests.get(article_url, timeout=10)
         res.raise_for_status()
@@ -48,251 +55,373 @@ def fetch_blog_og_image(article_url):
         print(f"ブログ画像取得エラー ({article_url}): {e}")
     return ""
 
-# --- 1つの通知（カルーセル）として一括送信 ---
-def send_test_carousel(items):
-    bubbles = []
-    for item in items:
-        bubble = {
-            "type": "bubble",
-            "size": "kilo"
-        }
-        
-        if item.get("img_url"):
-            bubble["hero"] = {
-                "type": "image",
-                "url": item["img_url"],
-                "size": "full",
-                "aspectRatio": "4:3",
-                "aspectMode": "cover"
-            }
+def extract_blog_item(article, base_url):
+    """記事要素から個別記事のURL(/archives/XXXX)・タイトル・画像を取得"""
+    a_tag = None
+    # /archives/ を含むリンクを最優先取得
+    a_tags = article.find_all("a", href=lambda h: h and "archives/" in h)
+    if a_tags:
+        a_tag = a_tags[0]
+    else:
+        a_tag = article.find("a", href=lambda h: h and ("archives" in h or re.search(r'/\d+/?$', h)))
 
-        header_contents = [
-            {
-                "type": "text",
-                "text": item["category_name"],
-                "weight": "bold",
-                "color": item["color_code"],
-                "size": "xs",
-                "flex": 1
-            }
-        ]
-        if KITIYA_LOGO_URL:
-            header_contents.append({
-                "type": "image",
-                "url": KITIYA_LOGO_URL,
-                "size": "xxs",
-                "aspectMode": "fit",
-                "flex": 0,
-                "margin": "sm"
-            })
+    if not a_tag or not a_tag.get("href"):
+        return None
 
-        body_contents = [
-            {
-                "type": "box",
-                "layout": "horizontal",
-                "contents": header_contents,
-                "alignItems": "center"
-            },
-            {
-                "type": "text",
-                "text": item["title"],
-                "weight": "bold",
-                "size": "sm",
-                "wrap": True,
-                "margin": "sm",
-                "maxLines": 3
-            }
-        ]
+    url = urljoin(base_url, a_tag["href"])
+    if url.rstrip('/') == base_url.rstrip('/'):
+        return None
 
-        if item.get("price"):
-            body_contents.append({
-                "type": "text",
-                "text": f"価格: {item['price']}",
-                "size": "xs",
-                "color": "#111111",
-                "weight": "bold",
-                "margin": "xs"
-            })
+    title = a_tag.get_text(strip=True)
+    if not title:
+        title_elem = article.select_one("h1, h2, h3, .entry-title")
+        if title_elem:
+            title = title_elem.get_text(strip=True)
 
-        bubble["body"] = {
-            "type": "box",
-            "layout": "vertical",
-            "contents": body_contents
-        }
+    img_tag = article.select_one("img")
+    img_url = clean_image_url(img_tag, base_url)
+    if not img_url:
+        img_url = fetch_blog_og_image(url)
 
-        bubble["footer"] = {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {
-                    "type": "button",
-                    "action": {
-                        "type": "uri",
-                        "label": item["btn_label"],
-                        "uri": item["url"]
-                    },
-                    "style": "primary",
-                    "color": item["color_code"]
-                }
-            ]
-        }
-        bubbles.append(bubble)
-
-    payload = {
-        "to": LINE_USER_ID,
-        "messages": [
-            {
-                "type": "flex",
-                "altText": "【吉や】5パターン表示テスト",
-                "contents": {
-                    "type": "carousel",
-                    "contents": bubbles
-                }
-            }
-        ]
+    return {
+        "title": title or "ブログ更新のお知らせ",
+        "url": url,
+        "img_url": img_url,
+        "category": "blog",
+        "status_type": "blog"
     }
 
-    try:
-        res = requests.post(
-            "https://api.line.me/v2/bot/message/push",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
-            },
-            json=payload,
-            timeout=10
+# --- データベース処理 ---
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS blog_posts (
+            url TEXT PRIMARY KEY, title TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        res.raise_for_status()
-        print("1通の横スクロール通知（5カード）を送信しました！")
-    except Exception as e:
-        print(f"送信エラー: {e}")
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            url TEXT PRIMARY KEY, title TEXT, price TEXT, is_sold_out INTEGER, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-# --- メインテスト処理 ---
-def main():
-    print("吉やサイトから本物のデータを取得してテスト送信を実行します...")
+def is_initial_run():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM products")
+    p_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM blog_posts")
+    b_count = cursor.fetchone()[0]
+    conn.close()
+    return (p_count == 0 and b_count == 0)
 
-    # 1. ブログ個別記事データ取得（URL精度アップ）
-    blog_url = ""
-    blog_title = "ブログ最新記事"
-    blog_img = ""
+# --- スクレイピング処理 ---
+def check_blog_updates(initial_run=False):
+    new_items = []
     try:
-        res = requests.get(BLOG_URL, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-        
-        # archives/XXXX 形式の個別記事リンクを最優先で検索
-        a_tags = soup.find_all("a", href=lambda h: h and "archives/" in h)
-        if a_tags:
-            for a in a_tags:
-                href = a.get("href", "")
-                full = urljoin(BLOG_URL, href)
-                if full.rstrip('/') != BLOG_URL.rstrip('/'):
-                    blog_url = full
-                    blog_title = a.get_text(strip=True) or blog_title
-                    break
-        
-        if blog_url:
-            blog_img = fetch_blog_og_image(blog_url)
+        response = requests.get(BLOG_URL, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+
+        articles = soup.select("article, .post, .entry, .post-list-item")
+        for article in articles[:10]:
+            blog_item = extract_blog_item(article, BLOG_URL)
+            if not blog_item:
+                continue
+
+            url = blog_item["url"]
+            title = blog_item["title"]
+
+            cursor.execute("SELECT url FROM blog_posts WHERE url = ?", (url,))
+            if not cursor.fetchone():
+                cursor.execute("INSERT INTO blog_posts (url, title) VALUES (?, ?)", (url, title))
+                if not initial_run:
+                    new_items.append(blog_item)
+
+        conn.commit()
+        conn.close()
     except Exception as e:
-        print(f"ブログ取得エラー: {e}")
+        print(f"ブログスクレイピングエラー: {e}")
 
-    # 万が一取れなかった場合のバックアップ用個別記事URL
-    if not blog_url:
-        blog_url = "https://www.kitiya.jp/apps/note/archives/23620"
-        blog_img = fetch_blog_og_image(blog_url)
+    return new_items
 
-    # 2. 商品データ取得（Playwright使用）[cite: 1]
-    products = []
+def check_product_updates(initial_run=False):
+    new_items = []
+    page_num = 1
+    all_seen_urls = set()
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        page.goto(TROUT_BASE_URL, wait_until="networkidle")
-        soup = BeautifulSoup(page.content(), "html.parser")
-        
-        main_area = soup.select_one("#main, .main_content, .product_list, .item_list") or soup
-        item_links = main_area.find_all("a", href=lambda h: h and "pid=" in h)
-        
-        seen = set()
-        for link in item_links:
-            href = link.get("href")
-            full_url = urljoin(TROUT_BASE_URL, href)
-            if full_url not in seen:
-                seen.add(full_url)
-                parent = link.find_parent("li") or link.find_parent("div") or link.parent
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+
+        while True:
+            url = TROUT_BASE_URL if page_num == 1 else f"{TROUT_BASE_URL}&page={page_num}"
                 
-                title = link.get_text(strip=True) or "テスト商品"
-                price_match = re.search(r"[\d,]+\s*円", parent.get_text() if parent else "")
-                price = price_match.group(0) if price_match else "525円(税込)"
-                
-                img_tag = parent.select_one("img") if parent else None
-                img_url = clean_image_url(img_tag, TROUT_BASE_URL)
-                
-                products.append({"title": title, "url": full_url, "img_url": img_url, "price": price})
-                if len(products) >= 4:
+            try:
+                print(f"ページ {page_num} を巡回中...")
+                page.goto(url, wait_until="networkidle")
+                soup = BeautifulSoup(page.content(), "html.parser")
+
+                main_area = soup.select_one("#main, .main_content, .product_list, .item_list") or soup
+                product_list = main_area.select(".product_item, .item_box, li.item, .product_list li, .item_list li")
+
+                if not product_list:
+                    item_links = main_area.find_all("a", href=lambda h: h and "pid=" in h)
+                    containers = []
+                    for link in item_links:
+                        parent = link.find_parent("li") or link.find_parent("div") or link.parent
+                        if parent and parent not in containers:
+                            containers.append(parent)
+                    product_list = containers
+
+                new_urls_in_this_page = 0
+
+                for item in product_list:
+                    a_tag = item.find("a", href=lambda h: h and "pid=" in h) or item.select_one("a")
+                    if not a_tag or not a_tag.get("href"):
+                        continue
+
+                    item_url = urljoin(url, a_tag["href"])
+
+                    if item_url not in all_seen_urls:
+                        all_seen_urls.add(item_url)
+                        new_urls_in_this_page += 1
+
+                    title = a_tag.get_text(strip=True)
+                    if not title:
+                        img_in_a = a_tag.select_one("img")
+                        if img_in_a and img_in_a.get("alt"):
+                            title = img_in_a["alt"]
+                    if not title:
+                        title_elem = item.select_one(".product_name, .name, h2, h3")
+                        if title_elem:
+                            title = title_elem.get_text(strip=True)
+                    if not title:
+                        continue
+
+                    price_match = re.search(r"[\d,]+\s*円", item.get_text())
+                    price = price_match.group(0) if price_match else "価格不詳"
+
+                    img_tag = item.select_one("img")
+                    img_url = clean_image_url(img_tag, url)
+
+                    item_text = item.get_text()
+                    is_sold_out = 1 if ("SOLD OUT" in item_text.upper() or "売り切れ" in item_text) else 0
+
+                    # 属性の自動判定（新色・特価品・新入荷）
+                    status_type = "new"
+                    if "新色" in title:
+                        status_type = "new_color"
+                    elif "特価" in item_text or "セール" in item_text or "SALE" in item_text.upper():
+                        status_type = "bargain"
+
+                    cursor.execute("SELECT is_sold_out FROM products WHERE url = ?", (item_url,))
+                    row = cursor.fetchone()
+
+                    if row is None:
+                        cursor.execute("INSERT INTO products (url, title, price, is_sold_out) VALUES (?, ?, ?, ?)",
+                                       (item_url, title, price, is_sold_out))
+                        if not initial_run and not is_sold_out:
+                            new_items.append({
+                                "title": title, "url": item_url, "img_url": img_url,
+                                "price": price, "category": "product", "status_type": status_type
+                            })
+                    else:
+                        old_sold_out = row[0]
+                        if old_sold_out == 1 and is_sold_out == 0:
+                            if not initial_run:
+                                new_items.append({
+                                    "title": title, "url": item_url, "img_url": img_url,
+                                    "price": price, "category": "product", "status_type": "restock"
+                                })
+                        cursor.execute("UPDATE products SET is_sold_out = ?, price = ?, updated_at = CURRENT_TIMESTAMP WHERE url = ?",
+                                       (is_sold_out, price, item_url))
+
+                if new_urls_in_this_page == 0:
                     break
+
+                page_num += 1
+                if page_num > 100:
+                    break
+
+            except Exception as e:
+                print(f"商品スクレイピングエラー（ページ {page_num}）: {e}")
+                break
+
+        conn.commit()
+        conn.close()
         browser.close()
 
-    def get_p(idx):
-        if idx < len(products):
-            return products[idx]
-        return {"title": "ロデオクラフト ノア", "url": TROUT_BASE_URL, "img_url": KITIYA_LOGO_URL, "price": "525円(税込)"}
+    return new_items
 
-    p0, p1, p2, p3 = get_p(0), get_p(1), get_p(2), get_p(3)
+# --- LINE通知処理（5色テーマカラー対応） ---
+def send_line_carousel(items):
+    if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
+        print("LINEの設定情報（トークン/ID）が見つかりません。")
+        return
+    if not items:
+        return
 
-    test_cards = [
-        # ① ブログ更新（緑）
-        {
-            "category_name": "【吉や】ブログ更新",
-            "btn_label": "記事を読む",
-            "color_code": "#00B900",
-            "title": blog_title,
-            "price": None,
-            "url": blog_url,
-            "img_url": blog_img or KITIYA_LOGO_URL
-        },
-        # ② 新入荷（赤）
-        {
-            "category_name": "【吉や】✨新入荷商品",
-            "btn_label": "商品ページへ",
-            "color_code": "#E60012",
-            "title": p0["title"],
-            "price": p0["price"],
-            "url": p0["url"],
-            "img_url": p0["img_url"]
-        },
-        # ③ 新色入荷（青）
-        {
-            "category_name": "【吉や】🎨新色入荷！",
-            "btn_label": "商品ページへ",
-            "color_code": "#007AFF",
-            "title": p1["title"],
-            "price": p1["price"],
-            "url": p1["url"],
-            "img_url": p1["img_url"]
-        },
-        # ④ 特価品（ピンク）
-        {
-            "category_name": "【吉や】🉐特価品入荷！",
-            "btn_label": "商品ページへ",
-            "color_code": "#FF007F",
-            "title": p2["title"],
-            "price": p2["price"],
-            "url": p2["url"],
-            "img_url": p2["img_url"]
-        },
-        # ⑤ 再入荷（オレンジ）
-        {
-            "category_name": "【吉や】🔥再入荷情報！",
-            "btn_label": "商品ページへ",
-            "color_code": "#E69D00",
-            "title": p3["title"],
-            "price": p3["price"],
-            "url": p3["url"],
-            "img_url": p3["img_url"]
+    chunk_size = 10
+    for i in range(0, len(items), chunk_size):
+        chunk = items[i:i + chunk_size]
+        bubbles = []
+
+        for item in chunk:
+            status_type = item.get("status_type", "new")
+            
+            # 5種類のテーマカラー・タイトル・ボタン設定
+            if item.get("category") == "blog" or status_type == "blog":
+                category_name = "【吉や】ブログ更新"
+                btn_label = "記事を読む"
+                color_code = "#00B900"  # LINEグリーン
+            elif status_type == "new_color":
+                category_name = "【吉や】🎨新色入荷！"
+                btn_label = "商品ページへ"
+                color_code = "#007AFF"  # ディープブルー
+            elif status_type == "bargain":
+                category_name = "【吉や】🉐特価品入荷！"
+                btn_label = "商品ページへ"
+                color_code = "#FF007F"  # ネオンピンク
+            elif status_type == "restock":
+                category_name = "【吉や】🔥再入荷情報！"
+                btn_label = "商品ページへ"
+                color_code = "#E69D00"  # アンバーオレンジ
+            else: # 新入荷（標準）
+                category_name = "【吉や】✨新入荷商品"
+                btn_label = "商品ページへ"
+                color_code = "#E60012"  # ビビッドレッド
+
+            bubble = {
+                "type": "bubble",
+                "size": "kilo"
+            }
+            
+            if item.get("img_url"):
+                bubble["hero"] = {
+                    "type": "image",
+                    "url": item["img_url"],
+                    "size": "full",
+                    "aspectRatio": "4:3",
+                    "aspectMode": "cover"
+                }
+
+            header_contents = [
+                {
+                    "type": "text",
+                    "text": category_name,
+                    "weight": "bold",
+                    "color": color_code,
+                    "size": "xs",
+                    "flex": 1
+                }
+            ]
+            if KITIYA_LOGO_URL:
+                header_contents.append({
+                    "type": "image",
+                    "url": KITIYA_LOGO_URL,
+                    "size": "xxs",
+                    "aspectMode": "fit",
+                    "flex": 0,
+                    "margin": "sm"
+                })
+
+            body_contents = [
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "contents": header_contents,
+                    "alignItems": "center"
+                },
+                {
+                    "type": "text",
+                    "text": item["title"],
+                    "weight": "bold",
+                    "size": "sm",
+                    "wrap": True,
+                    "margin": "sm",
+                    "maxLines": 3
+                }
+            ]
+
+            if item.get("price"):
+                body_contents.append({
+                    "type": "text",
+                    "text": f"価格: {item['price']}",
+                    "size": "xs",
+                    "color": "#111111",
+                    "weight": "bold",
+                    "margin": "xs"
+                })
+
+            bubble["body"] = {
+                "type": "box",
+                "layout": "vertical",
+                "contents": body_contents
+            }
+
+            bubble["footer"] = {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "uri",
+                            "label": btn_label,
+                            "uri": item["url"]
+                        },
+                        "style": "primary",
+                        "color": color_code
+                    }
+                ]
+            }
+            bubbles.append(bubble)
+
+        payload = {
+            "to": LINE_USER_ID,
+            "messages": [{"type": "flex", "altText": f"【吉や】更新情報（{len(chunk)}件）", "contents": {"type": "carousel", "contents": bubbles}}]
         }
-    ]
 
-    # 1通の横スクロール通知（カルーセル）として送信
-    send_test_carousel(test_cards)
+        try:
+            res = requests.post("https://api.line.me/v2/bot/message/push", 
+                                headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}, 
+                                json=payload, timeout=10)
+            res.raise_for_status()
+            print(f"LINE通知完了: {len(chunk)} 件")
+        except Exception as e:
+            print(f"LINE通知エラー: {e}")
+
+# --- 実行エントリーポイント ---
+def main():
+    print("スクレイピング処理を開始します...")
+    init_db()
+
+    initial_run = is_initial_run()
+    if initial_run:
+        print("初回実行を検知しました。データベースの構築のみ行い、LINE通知はスキップします。")
+
+    blog_updates = check_blog_updates(initial_run)
+    product_updates = check_product_updates(initial_run)
+
+    all_updates = blog_updates + product_updates
+
+    if initial_run:
+        print("初回データベース構築が完了しました。")
+    elif all_updates:
+        print(f"新しい更新を {len(all_updates)} 件検知しました。")
+        send_line_carousel(all_updates)
+    else:
+        print("確実な新規・再入荷情報はありませんでした。")
 
 if __name__ == "__main__":
     main()

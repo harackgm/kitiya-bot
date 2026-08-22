@@ -25,100 +25,129 @@ def clean_image_url(img_tag, base_url):
         full_url = full_url.replace("http://", "https://", 1)
     return full_url
 
-# --- 個別LINE送信（単発通知用） ---
-def send_single_card(item):
-    bubble = {
-        "type": "bubble",
-        "size": "kilo"
-    }
-    
-    if item.get("img_url"):
-        bubble["hero"] = {
-            "type": "image",
-            "url": item["img_url"],
-            "size": "full",
-            "aspectRatio": "4:3",
-            "aspectMode": "cover"
+def fetch_blog_og_image(article_url):
+    """個別記事ページからアイキャッチ画像を取得"""
+    try:
+        res = requests.get(article_url, timeout=10)
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        og_image = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
+        if og_image and og_image.get("content"):
+            img_url = og_image["content"]
+            if img_url.startswith("http://"):
+                img_url = img_url.replace("http://", "https://", 1)
+            return img_url
+        
+        content_area = soup.select_one(".entry-content, article, .post-content, #main") or soup
+        for img in content_area.select("img"):
+            src = clean_image_url(img, article_url)
+            if src and "avatar" not in src and "logo" not in src:
+                return src
+    except Exception as e:
+        print(f"ブログ画像取得エラー ({article_url}): {e}")
+    return ""
+
+# --- 1つの通知（カルーセル）として一括送信 ---
+def send_test_carousel(items):
+    bubbles = []
+    for item in items:
+        bubble = {
+            "type": "bubble",
+            "size": "kilo"
         }
+        
+        if item.get("img_url"):
+            bubble["hero"] = {
+                "type": "image",
+                "url": item["img_url"],
+                "size": "full",
+                "aspectRatio": "4:3",
+                "aspectMode": "cover"
+            }
 
-    header_contents = [
-        {
-            "type": "text",
-            "text": item["category_name"],
-            "weight": "bold",
-            "color": item["color_code"],
-            "size": "xs",
-            "flex": 1
-        }
-    ]
-    if KITIYA_LOGO_URL:
-        header_contents.append({
-            "type": "image",
-            "url": KITIYA_LOGO_URL,
-            "size": "xxs",
-            "aspectMode": "fit",
-            "flex": 0,
-            "margin": "sm"
-        })
-
-    body_contents = [
-        {
-            "type": "box",
-            "layout": "horizontal",
-            "contents": header_contents,
-            "alignItems": "center"
-        },
-        {
-            "type": "text",
-            "text": item["title"],
-            "weight": "bold",
-            "size": "sm",
-            "wrap": True,
-            "margin": "sm",
-            "maxLines": 3
-        }
-    ]
-
-    if item.get("price"):
-        body_contents.append({
-            "type": "text",
-            "text": f"価格: {item['price']}",
-            "size": "xs",
-            "color": "#111111",
-            "weight": "bold",
-            "margin": "xs"
-        })
-
-    bubble["body"] = {
-        "type": "box",
-        "layout": "vertical",
-        "contents": body_contents
-    }
-
-    bubble["footer"] = {
-        "type": "box",
-        "layout": "vertical",
-        "contents": [
+        header_contents = [
             {
-                "type": "button",
-                "action": {
-                    "type": "uri",
-                    "label": item["btn_label"],
-                    "uri": item["url"]
-                },
-                "style": "primary",
-                "color": item["color_code"]
+                "type": "text",
+                "text": item["category_name"],
+                "weight": "bold",
+                "color": item["color_code"],
+                "size": "xs",
+                "flex": 1
             }
         ]
-    }
+        if KITIYA_LOGO_URL:
+            header_contents.append({
+                "type": "image",
+                "url": KITIYA_LOGO_URL,
+                "size": "xxs",
+                "aspectMode": "fit",
+                "flex": 0,
+                "margin": "sm"
+            })
+
+        body_contents = [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": header_contents,
+                "alignItems": "center"
+            },
+            {
+                "type": "text",
+                "text": item["title"],
+                "weight": "bold",
+                "size": "sm",
+                "wrap": True,
+                "margin": "sm",
+                "maxLines": 3
+            }
+        ]
+
+        if item.get("price"):
+            body_contents.append({
+                "type": "text",
+                "text": f"価格: {item['price']}",
+                "size": "xs",
+                "color": "#111111",
+                "weight": "bold",
+                "margin": "xs"
+            })
+
+        bubble["body"] = {
+            "type": "box",
+            "layout": "vertical",
+            "contents": body_contents
+        }
+
+        bubble["footer"] = {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "button",
+                    "action": {
+                        "type": "uri",
+                        "label": item["btn_label"],
+                        "uri": item["url"]
+                    },
+                    "style": "primary",
+                    "color": item["color_code"]
+                }
+            ]
+        }
+        bubbles.append(bubble)
 
     payload = {
         "to": LINE_USER_ID,
         "messages": [
             {
                 "type": "flex",
-                "altText": f"{item['category_name']} テスト通知",
-                "contents": bubble
+                "altText": "【吉や】5パターン表示テスト",
+                "contents": {
+                    "type": "carousel",
+                    "contents": bubbles
+                }
             }
         ]
     }
@@ -134,31 +163,42 @@ def send_single_card(item):
             timeout=10
         )
         res.raise_for_status()
-        print(f"送信成功: {item['category_name']}")
+        print("1通の横スクロール通知（5カード）を送信しました！")
     except Exception as e:
-        print(f"送信失敗 ({item['category_name']}): {e}")
+        print(f"送信エラー: {e}")
 
 # --- メインテスト処理 ---
 def main():
-    print("吉やサイトから本物のデータを取得して5パターンの通知テストを開始します...")
+    print("吉やサイトから本物のデータを取得してテスト送信を実行します...")
 
-    # 1. ブログデータ取得
-    blog_url = BLOG_URL
+    # 1. ブログ個別記事データ取得（URL精度アップ）
+    blog_url = ""
     blog_title = "ブログ最新記事"
     blog_img = ""
     try:
         res = requests.get(BLOG_URL, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
-        article = soup.select_one("article, .post, .entry")
-        if article:
-            a_tag = article.find("a", href=lambda h: h and "archives" in h)
-            if a_tag:
-                blog_url = urljoin(BLOG_URL, a_tag["href"])
-                blog_title = a_tag.get_text(strip=True) or blog_title
-            img_tag = article.select_one("img")
-            blog_img = clean_image_url(img_tag, BLOG_URL)
+        
+        # archives/XXXX 形式の個別記事リンクを最優先で検索
+        a_tags = soup.find_all("a", href=lambda h: h and "archives/" in h)
+        if a_tags:
+            for a in a_tags:
+                href = a.get("href", "")
+                full = urljoin(BLOG_URL, href)
+                if full.rstrip('/') != BLOG_URL.rstrip('/'):
+                    blog_url = full
+                    blog_title = a.get_text(strip=True) or blog_title
+                    break
+        
+        if blog_url:
+            blog_img = fetch_blog_og_image(blog_url)
     except Exception as e:
         print(f"ブログ取得エラー: {e}")
+
+    # 万が一取れなかった場合のバックアップ用個別記事URL
+    if not blog_url:
+        blog_url = "https://www.kitiya.jp/apps/note/archives/23620"
+        blog_img = fetch_blog_og_image(blog_url)
 
     # 2. 商品データ取得（Playwright使用）[cite: 1]
     products = []
@@ -191,64 +231,59 @@ def main():
                     break
         browser.close()
 
-    # ダミー補填用（商品が不足していた場合）
     def get_p(idx):
         if idx < len(products):
             return products[idx]
-        return {"title": "【テスト商品】ロデオクラフト ノア", "url": TROUT_BASE_URL, "img_url": KITIYA_LOGO_URL, "price": "525円(税込)"}
+        return {"title": "ロデオクラフト ノア", "url": TROUT_BASE_URL, "img_url": KITIYA_LOGO_URL, "price": "525円(税込)"}
 
-    p0 = get_p(0)
-    p1 = get_p(1)
-    p2 = get_p(2)
-    p3 = get_p(3)
+    p0, p1, p2, p3 = get_p(0), get_p(1), get_p(2), get_p(3)
 
-    # 指定された5つの配色・タイトルパターンで1件ずつ構築
     test_cards = [
-        # ① ブログ更新
+        # ① ブログ更新（緑）
         {
             "category_name": "【吉や】ブログ更新",
             "btn_label": "記事を読む",
-            "color_code": "#00B900",  # LINEグリーン
+            "color_code": "#00B900",
             "title": blog_title,
             "price": None,
             "url": blog_url,
             "img_url": blog_img or KITIYA_LOGO_URL
         },
-        # ② 新入荷
+        # ② 新入荷（赤）
         {
             "category_name": "【吉や】✨新入荷商品",
             "btn_label": "商品ページへ",
-            "color_code": "#E60012",  # ビビッドレッド
+            "color_code": "#E60012",
             "title": p0["title"],
             "price": p0["price"],
             "url": p0["url"],
             "img_url": p0["img_url"]
         },
-        # ③ 新色入荷
+        # ③ 新色入荷（青）
         {
             "category_name": "【吉や】🎨新色入荷！",
             "btn_label": "商品ページへ",
-            "color_code": "#007AFF",  # ディープブルー
+            "color_code": "#007AFF",
             "title": p1["title"],
             "price": p1["price"],
             "url": p1["url"],
             "img_url": p1["img_url"]
         },
-        # ④ 特価品
+        # ④ 特価品（ピンク）
         {
             "category_name": "【吉や】🉐特価品入荷！",
             "btn_label": "商品ページへ",
-            "color_code": "#FF007F",  # ネオンピンク
+            "color_code": "#FF007F",
             "title": p2["title"],
             "price": p2["price"],
             "url": p2["url"],
             "img_url": p2["img_url"]
         },
-        # ⑤ 再入荷
+        # ⑤ 再入荷（オレンジ）
         {
             "category_name": "【吉や】🔥再入荷情報！",
             "btn_label": "商品ページへ",
-            "color_code": "#E69D00",  # アンバーオレンジ
+            "color_code": "#E69D00",
             "title": p3["title"],
             "price": p3["price"],
             "url": p3["url"],
@@ -256,9 +291,8 @@ def main():
         }
     ]
 
-    # 1件ずつ順番にLINEへ送信
-    for card in test_cards:
-        send_single_card(card)
+    # 1通の横スクロール通知（カルーセル）として送信
+    send_test_carousel(test_cards)
 
 if __name__ == "__main__":
     main()

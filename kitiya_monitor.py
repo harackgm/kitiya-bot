@@ -31,6 +31,22 @@ def clean_image_url(img_tag, base_url):
         full_url = full_url.replace("http://", "https://", 1)
     return full_url
 
+def clean_title_text(element):
+    """HTMLタグや不要な改行を徹底的に除去して綺麗な商品名・タイトルを返す"""
+    if not element:
+        return ""
+    # HTML要素から画像タグ(img)を除去してからテキスト抽出
+    soup_copy = BeautifulSoup(str(element), "html.parser")
+    for img in soup_copy.find_all("img"):
+        img.decompose()
+    
+    text = soup_copy.get_text(strip=True)
+    # 正規表現で残ったHTMLタグっぽい文字列を完全に除去
+    text = re.sub(r'<[^>]+>', '', text)
+    # 連続する空白や改行を整形
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
 def fetch_blog_og_image(article_url):
     try:
         res = requests.get(article_url, timeout=10)
@@ -68,11 +84,11 @@ def extract_blog_item(article, base_url):
     if url.rstrip('/') == base_url.rstrip('/'):
         return None
 
-    title = a_tag.get_text(strip=True)
+    title = clean_title_text(a_tag)
     if not title:
         title_elem = article.select_one("h1, h2, h3, .entry-title")
         if title_elem:
-            title = title_elem.get_text(strip=True)
+            title = clean_title_text(title_elem)
 
     img_tag = article.select_one("img")
     img_url = clean_image_url(img_tag, base_url)
@@ -112,7 +128,11 @@ def is_initial_run():
     cursor.execute("SELECT COUNT(*) FROM blog_posts")
     b_count = cursor.fetchone()[0]
     conn.close()
-    return (p_count == 0 and b_count == 0)
+    
+    # 完全に空、または前回の誤登録防止として商品数が100件未満の場合は初期化（通知スキップ）対象とする
+    if p_count < 100:
+        return True
+    return False
 
 # --- スクレイピング処理 ---
 def check_blog_updates(initial_run=False):
@@ -192,19 +212,17 @@ def check_product_updates(initial_run=False):
                         all_seen_urls.add(item_url)
                         new_urls_in_this_page += 1
 
-                    # タイトル取得＆HTMLタグ除去処理（強化版）
-                    title = a_tag.get_text(strip=True)
-                    title = re.sub(r'<[^>]+>', '', title)
+                    # 完全クレンジング関数を使用して綺麗テキストを取得
+                    title = clean_title_text(a_tag)
 
                     if not title:
                         img_in_a = a_tag.select_one("img")
                         if img_in_a and img_in_a.get("alt"):
-                            title = img_in_a["alt"]
+                            title = img_in_a["alt"].strip()
                     if not title:
                         title_elem = item.select_one(".product_name, .name, h2, h3")
                         if title_elem:
-                            title = title_elem.get_text(strip=True)
-                            title = re.sub(r'<[^>]+>', '', title)
+                            title = clean_title_text(title_elem)
                     if not title:
                         continue
 
@@ -223,7 +241,7 @@ def check_product_updates(initial_run=False):
                     elif "特価" in item_text or "セール" in item_text or "SALE" in item_text.upper():
                         status_type = "bargain"
 
-                    cursor.execute("SELECT is_sold_out FROM products WHERE url = ?", (item_url,))
+                    cursor.execute("SELECT is_sold_out, title FROM products WHERE url = ?", (item_url,))
                     row = cursor.fetchone()
 
                     if row is None:
@@ -236,14 +254,16 @@ def check_product_updates(initial_run=False):
                             })
                     else:
                         old_sold_out = row[0]
+                        # 常に最新のクリーンな商品名でDBを更新
+                        cursor.execute("UPDATE products SET is_sold_out = ?, price = ?, title = ?, updated_at = CURRENT_TIMESTAMP WHERE url = ?",
+                                       (is_sold_out, price, title, item_url))
+
                         if old_sold_out == 1 and is_sold_out == 0:
                             if not initial_run:
                                 new_items.append({
                                     "title": title, "url": item_url, "img_url": img_url,
                                     "price": price, "category": "product", "status_type": "restock"
                                 })
-                        cursor.execute("UPDATE products SET is_sold_out = ?, price = ?, updated_at = CURRENT_TIMESTAMP WHERE url = ?",
-                                       (is_sold_out, price, item_url))
 
                 if new_urls_in_this_page == 0:
                     break
@@ -406,7 +426,7 @@ def main():
 
     initial_run = is_initial_run()
     if initial_run:
-        print("初回実行を検知しました。データベースの構築のみ行い、LINE通知はスキップします。")
+        print("【安全装置発動】DBデータ不足または初回実行を検知。通知を行わずにDB構築・更新のみを実行します。")
 
     blog_updates = check_blog_updates(initial_run)
     product_updates = check_product_updates(initial_run)
@@ -414,7 +434,7 @@ def main():
     all_updates = blog_updates + product_updates
 
     if initial_run:
-        print("初回データベース構築が完了しました。")
+        print("データベースの構築・クレンジングが安全に完了しました。")
     elif all_updates:
         print(f"新しい更新を {len(all_updates)} 件検知しました。")
         send_line_carousel(all_updates)

@@ -83,11 +83,9 @@ def clean_title_text(text_or_elem):
     else:
         text = str(text_or_elem)
 
-    # HTMLタグ・文字列消去（<img...>タグも文字として残らないよう強力除去）
     text = re.sub(r'<img[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'<[^>]+>', '', text)
     
-    # 不要なマーク文言や日時表記の消去
     text = re.sub(r'^(New\s*Arrivals|Re\s*Arrivals|新入荷|再入荷|SALE|新色|SNS)\s*', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
@@ -126,14 +124,14 @@ def send_line_flex_messages(items):
                 tag_text = "【吉や】 ✨新入荷"
                 btn_color = "#E61B23"
 
+            # size: micro を削除し、標準の大きなバブルサイズに変更
             bubble = {
                 "type": "bubble",
-                "size": "micro",
                 "hero": {
                     "type": "image",
                     "url": image_url,
                     "size": "full",
-                    "aspectRatio": "4:3",
+                    "aspectRatio": "20:13",
                     "aspectMode": "cover"
                 },
                 "body": {
@@ -151,7 +149,7 @@ def send_line_flex_messages(items):
                             "type": "text",
                             "text": item['title'],
                             "weight": "bold",
-                            "size": "sm",
+                            "size": "md",
                             "margin": "xs",
                             "wrap": True
                         },
@@ -254,7 +252,7 @@ def scrape_kitiya():
         except Exception as e:
             print(f"ブログ取得エラー: {e}")
 
-        # 2. トラウト商品の監視（※item_idは既存DBの形式 f"trout_{url}" に固定）
+        # 2. トラウト商品の監視
         try:
             page.goto(TROUT_BASE_URL, wait_until="domcontentloaded", timeout=30000)
             soup = BeautifulSoup(page.content(), "html.parser")
@@ -273,12 +271,10 @@ def scrape_kitiya():
                 url = urljoin(TROUT_BASE_URL, link.get("href"))
                 title = clean_title_text(link)
 
-                # 再入荷判定（色分け用データ）
                 parent_html = str(parent) if parent else ""
                 is_restock = "再入荷" in parent_html or "Re Arrivals" in parent_html or "icons4.gif" in parent_html
                 item_type = "restock" if is_restock else "new"
 
-                # 【重要】DBキーは元通りの形式に戻し、既存DBと正常照合させる
                 item_id = f"trout_{url}"
 
                 price_elem = parent.select_one(".price, .product_price, .item_price") if parent else None

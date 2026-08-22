@@ -210,13 +210,27 @@ def scrape_kitiya():
         try:
             page.goto(BLOG_URL, wait_until="networkidle")
             soup = BeautifulSoup(page.content(), "html.parser")
-            articles = soup.select("article, .post, .entry")
-            for article in articles[:3]:
-                a_tag = article.select_one("a")
-                if a_tag and a_tag.get("href"):
-                    url = a_tag.get("href")
+            
+            # ブログ記事要素の抽出（特定セレクタでタイトルリンクを確実に捕捉）
+            articles = soup.select("article, .post, .entry, .type-post")
+            for article in articles[:5]:
+                # タイトルリンクを優先して検索（画像リンクを回避）
+                title_a_tag = article.select_one(".entry-title a, h2 a, h1 a, .post-title a")
+                if not title_a_tag:
+                    # 見つからない場合はテキストが存在するaタグを探す
+                    for a in article.select("a"):
+                        if a.get_text(strip=True):
+                            title_a_tag = a
+                            break
+
+                if title_a_tag and title_a_tag.get("href"):
+                    url = title_a_tag.get("href").rstrip("/")
+                    title = clean_title_text(title_a_tag.get_text(strip=True))
+                    
+                    if not title:
+                        continue
+
                     item_id = f"blog_{url}"
-                    title = clean_title_text(a_tag.get_text(strip=True))
                     img_tag = article.select_one("img")
                     image_url = clean_image_url(img_tag, BLOG_URL)
 
@@ -227,6 +241,7 @@ def scrape_kitiya():
                                 "price": "", "image_url": image_url
                             })
                         save_notified_item(item_id, title, url)
+                        print(f"検知したブログ: {title} ({url})")
         except Exception as e:
             print(f"ブログ取得エラー: {e}")
 

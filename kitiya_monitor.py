@@ -7,6 +7,12 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
+# ==========================================
+# ★ 安全スイッチ（True: 通知する / False: 絶対に通知しない）
+# テスト・データ整理中は False にしてください。
+ENABLE_LINE_NOTIFICATION = False
+# ==========================================
+
 # --- 設定情報 ---
 BLOG_URL = "https://www.kitiya.jp/apps/note/"
 TROUT_BASE_URL = "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n"
@@ -31,19 +37,22 @@ def clean_image_url(img_tag, base_url):
         full_url = full_url.replace("http://", "https://", 1)
     return full_url
 
-def clean_title_text(element):
-    """HTMLタグや不要な改行を徹底的に除去して綺麗な商品名・タイトルを返す"""
-    if not element:
+def clean_title_text(text_or_elem):
+    """HTMLタグ・文字列として埋め込まれたimgタグ・改行を完全に除去"""
+    if not text_or_elem:
         return ""
-    # HTML要素から画像タグ(img)を除去してからテキスト抽出
-    soup_copy = BeautifulSoup(str(element), "html.parser")
-    for img in soup_copy.find_all("img"):
-        img.decompose()
     
-    text = soup_copy.get_text(strip=True)
-    # 正規表現で残ったHTMLタグっぽい文字列を完全に除去
+    if hasattr(text_or_elem, 'get_text'):
+        soup_copy = BeautifulSoup(str(text_or_elem), "html.parser")
+        for img in soup_copy.find_all("img"):
+            img.decompose()
+        text = soup_copy.get_text(strip=True)
+    else:
+        text = str(text_or_elem)
+
+    # 文字列として混入している <img ... > を強力に消去
+    text = re.sub(r'<img[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'<[^>]+>', '', text)
-    # 連続する空白や改行を整形
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
@@ -125,14 +134,10 @@ def is_initial_run():
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM products")
     p_count = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM blog_posts")
-    b_count = cursor.fetchone()[0]
     conn.close()
     
-    # 完全に空、または前回の誤登録防止として商品数が100件未満の場合は初期化（通知スキップ）対象とする
-    if p_count < 100:
-        return True
-    return False
+    # 件数が100件未満の場合は初期構築とみなす
+    return p_count < 100
 
 # --- スクレイピング処理 ---
 def check_blog_updates(initial_run=False):
@@ -212,13 +217,13 @@ def check_product_updates(initial_run=False):
                         all_seen_urls.add(item_url)
                         new_urls_in_this_page += 1
 
-                    # 完全クレンジング関数を使用して綺麗テキストを取得
+                    # 完全クレンジング
                     title = clean_title_text(a_tag)
 
                     if not title:
                         img_in_a = a_tag.select_one("img")
                         if img_in_a and img_in_a.get("alt"):
-                            title = img_in_a["alt"].strip()
+                            title = clean_title_text(img_in_a["alt"])
                     if not title:
                         title_elem = item.select_one(".product_name, .name, h2, h3")
                         if title_elem:
@@ -241,7 +246,7 @@ def check_product_updates(initial_run=False):
                     elif "特価" in item_text or "セール" in item_text or "SALE" in item_text.upper():
                         status_type = "bargain"
 
-                    cursor.execute("SELECT is_sold_out, title FROM products WHERE url = ?", (item_url,))
+                    cursor.execute("SELECT is_sold_out FROM products WHERE url = ?", (item_url,))
                     row = cursor.fetchone()
 
                     if row is None:
@@ -254,7 +259,6 @@ def check_product_updates(initial_run=False):
                             })
                     else:
                         old_sold_out = row[0]
-                        # 常に最新のクリーンな商品名でDBを更新
                         cursor.execute("UPDATE products SET is_sold_out = ?, price = ?, title = ?, updated_at = CURRENT_TIMESTAMP WHERE url = ?",
                                        (is_sold_out, price, title, item_url))
 
@@ -284,6 +288,11 @@ def check_product_updates(initial_run=False):
 
 # --- LINE通知処理 ---
 def send_line_carousel(items):
+    # 安全スイッチによる強制停止制御
+    if not ENABLE_LINE_NOTIFICATION:
+        print("【安全機能】ENABLE_LINE_NOTIFICATION が False のため、LINE通知を強制スキップします。")
+        return
+
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
         print("LINEの設定情報が見つかりません。")
         return
@@ -412,7 +421,7 @@ def send_line_carousel(items):
 
         try:
             res = requests.post("https://api.line.me/v2/bot/message/push", 
-                                headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}, 
+                                headers={"Content-Type": "authorization", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}, 
                                 json=payload, timeout=10)
             res.raise_for_status()
             print(f"LINE通知完了: {len(chunk)} 件")
@@ -426,7 +435,7 @@ def main():
 
     initial_run = is_initial_run()
     if initial_run:
-        print("【安全装置発動】DBデータ不足または初回実行を検知。通知を行わずにDB構築・更新のみを実行します。")
+        print("【初回/再構築モード】DBの初期登録を実行します。")
 
     blog_updates = check_blog_updates(initial_run)
     product_updates = check_product_updates(initial_run)
@@ -434,7 +443,7 @@ def main():
     all_updates = blog_updates + product_updates
 
     if initial_run:
-        print("データベースの構築・クレンジングが安全に完了しました。")
+        print("データベースの構築・クレンジングが完了しました。")
     elif all_updates:
         print(f"新しい更新を {len(all_updates)} 件検知しました。")
         send_line_carousel(all_updates)

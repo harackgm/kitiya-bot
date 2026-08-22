@@ -87,8 +87,9 @@ def clean_title_text(text_or_elem):
     text = re.sub(r'<img[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'<[^>]+>', '', text)
     
-    # New Arrivals / Re Arrivals などの余計なマーク文言を消去
+    # 不要なマーク文言や日時表記の消去
     text = re.sub(r'^(New\s*Arrivals|Re\s*Arrivals|新入荷|再入荷|SALE|新色)\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
@@ -206,42 +207,43 @@ def scrape_kitiya():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # 1. ブログ更新の監視
+        # 1. ブログ更新の監視（URLパターン直接検索）
         try:
             page.goto(BLOG_URL, wait_until="networkidle")
             soup = BeautifulSoup(page.content(), "html.parser")
             
-            # ブログ記事要素の抽出（特定セレクタでタイトルリンクを確実に捕捉）
-            articles = soup.select("article, .post, .entry, .type-post")
-            for article in articles[:5]:
-                # タイトルリンクを優先して検索（画像リンクを回避）
-                title_a_tag = article.select_one(".entry-title a, h2 a, h1 a, .post-title a")
-                if not title_a_tag:
-                    # 見つからない場合はテキストが存在するaタグを探す
-                    for a in article.select("a"):
-                        if a.get_text(strip=True):
-                            title_a_tag = a
-                            break
+            # /apps/note/archives/数字 のリンクを持つaタグを直接抽出
+            blog_links = soup.find_all("a", href=re.compile(r"/apps/note/archives/\d+"))
+            
+            seen_urls = set()
+            for a_tag in blog_links:
+                url = urljoin(BLOG_URL, a_tag.get("href")).rstrip("/")
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
 
-                if title_a_tag and title_a_tag.get("href"):
-                    url = title_a_tag.get("href").rstrip("/")
-                    title = clean_title_text(title_a_tag.get_text(strip=True))
-                    
-                    if not title:
-                        continue
+                # カード全体の親要素またはaタグ自体からタイトルを取得
+                parent = a_tag.find_parent("article") or a_tag.find_parent("div") or a_tag
+                title = clean_title_text(a_tag.get_text(strip=True) or parent.get_text(strip=True))
 
-                    item_id = f"blog_{url}"
-                    img_tag = article.select_one("img")
-                    image_url = clean_image_url(img_tag, BLOG_URL)
+                if not title or len(title) < 2:
+                    continue
 
-                    if not is_already_notified(item_id):
-                        if not first_run:
-                            new_items_to_notify.append({
-                                "id": item_id, "title": title, "url": url,
-                                "price": "", "image_url": image_url
-                            })
-                        save_notified_item(item_id, title, url)
-                        print(f"検知したブログ: {title} ({url})")
+                item_id = f"blog_{url}"
+                img_tag = parent.select_one("img") if parent else None
+                image_url = clean_image_url(img_tag, BLOG_URL)
+
+                if not is_already_notified(item_id):
+                    if not first_run:
+                        new_items_to_notify.append({
+                            "id": item_id, "title": title, "url": url,
+                            "price": "", "image_url": image_url
+                        })
+                    save_notified_item(item_id, title, url)
+                    print(f"検知したブログ: {title} ({url})")
+                
+                if len(seen_urls) >= 5:
+                    break
         except Exception as e:
             print(f"ブログ取得エラー: {e}")
 
@@ -265,11 +267,9 @@ def scrape_kitiya():
                 item_id = f"trout_{url}"
                 title = clean_title_text(link)
 
-                # 価格の取得
                 price_elem = parent.select_one(".price, .product_price, .item_price")
                 price = price_elem.get_text(strip=True) if price_elem else ""
 
-                # 画像の取得
                 img_tag = parent.select_one("img")
                 image_url = clean_image_url(img_tag, TROUT_BASE_URL)
 
@@ -285,7 +285,6 @@ def scrape_kitiya():
 
         browser.close()
 
-    # 通知処理（初回以外で差分があれば送信）
     if new_items_to_notify:
         print(f"新規アイテム {len(new_items_to_notify)} 件をLINEに通知します。")
         send_line_flex_messages(new_items_to_notify)

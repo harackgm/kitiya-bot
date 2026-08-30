@@ -2,9 +2,9 @@ name: Kitiya Monitor Bot
 
 on:
   schedule:
-    # 15分ごとに自動実行（UTC表記）
+    # 15分ごとに実行 (UTC基準)
     - cron: '*/15 * * * *'
-  workflow_dispatch: # 手動実行ボタン用
+  workflow_dispatch:
 
 jobs:
   scrape-and-notify:
@@ -25,7 +25,6 @@ jobs:
           pip install requests beautifulsoup4 playwright
           playwright install chromium
 
-      # 1. 前回の SQLite データベースをキャッシュから確実に復元
       - name: Restore SQLite DB Cache
         uses: actions/cache/restore@v4
         with:
@@ -34,14 +33,13 @@ jobs:
           restore-keys: |
             kitiya-db-
 
-      # 2. 監視スクリプトの実行
       - name: Run Monitor Script
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          TZ: "Asia/Tokyo"
         run: python kitiya_monitor.py
 
-      # 3. 更新された SQLite データベースをキャッシュとして保存
       - name: Save SQLite DB Cache
         uses: actions/cache/save@v4
         if: always()

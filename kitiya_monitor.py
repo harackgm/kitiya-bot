@@ -13,10 +13,13 @@ TROUT_BASE_URL = "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n"
 DB_FILE = "kitiya_data.db"
 KITIYA_LOGO_URL = "https://www.kitiya.jp/apps/note/wp-content/uploads/2023/01/cropped-logo-192x192.png"
 
+# 大量通知連投を防ぐ安全装置の上限値
+MAX_NOTIFY_LIMIT = 10
+
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
-# --- データベース初期化 ---
+# --- データベース処理 ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -71,7 +74,6 @@ def clean_image_url(img_tag, base_url):
     return full_url
 
 def clean_title_text(text_or_elem):
-    """HTMLタグ、New Arrivals、SNSなどのマーク文字、改行を完全に除去"""
     if not text_or_elem:
         return ""
     
@@ -85,7 +87,6 @@ def clean_title_text(text_or_elem):
 
     text = re.sub(r'<img[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'<[^>]+>', '', text)
-    
     text = re.sub(r'^(New\s*Arrivals|Re\s*Arrivals|新入荷|再入荷|SALE|新色|SNS)\s*', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
@@ -110,7 +111,6 @@ def send_line_flex_messages(items):
             image_url = item['image_url'] if item['image_url'] else KITIYA_LOGO_URL
             item_type = item.get('type', 'new')
             
-            # カテゴリ・入荷種別ごとの色分けとデザイン
             if "blog_" in item['id']:
                 badge_color = "#00B900"
                 tag_text = "【吉や】 ブログ更新"
@@ -197,7 +197,6 @@ def send_line_flex_messages(items):
         
         res = requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=flex_payload)
         
-        # 送信結果の判定ロジック追加（上限エラーの検知）
         if res.status_code == 429 or (res.status_code != 200 and "limit" in res.text.lower()):
             print("[ERROR] 今月分のLINE通知上限（200通）に到達しました。")
         else:
@@ -244,12 +243,10 @@ def scrape_kitiya():
                 image_url = clean_image_url(img_tag, BLOG_URL)
 
                 if not is_already_notified(item_id):
-                    if not first_run:
-                        new_items_to_notify.append({
-                            "id": item_id, "type": "blog", "title": title, "url": url,
-                            "price": "", "image_url": image_url
-                        })
-                    save_notified_item(item_id, title, url)
+                    new_items_to_notify.append({
+                        "id": item_id, "type": "blog", "title": title, "url": url,
+                        "price": "", "image_url": image_url
+                    })
                 
                 if len(seen_urls) >= 5:
                     break
@@ -267,6 +264,7 @@ def scrape_kitiya():
                 title_text = clean_title_text(link)
                 if not title_text or len(title_text) < 2:
                     continue
+                
                 parent = link.find_parent("li") or link.find_parent("div")
                 if parent and parent not in items_found:
                     items_found.append((link, parent))
@@ -288,21 +286,32 @@ def scrape_kitiya():
                 image_url = clean_image_url(img_tag, TROUT_BASE_URL)
 
                 if not is_already_notified(item_id):
-                    if not first_run:
-                        new_items_to_notify.append({
-                            "id": item_id, "type": item_type, "title": title, "url": url,
-                            "price": price, "image_url": image_url
-                        })
-                    save_notified_item(item_id, title, url)
+                    new_items_to_notify.append({
+                        "id": item_id, "type": item_type, "title": title, "url": url,
+                        "price": price, "image_url": image_url
+                    })
         except Exception as e:
             print(f"商品取得エラー: {e}")
 
         context.close()
         browser.close()
 
+    # 通知・既読処理（ガードレール適用）
     if new_items_to_notify:
-        print(f"新規アイテム {len(new_items_to_notify)} 件をLINEに通知します。")
-        send_line_flex_messages(new_items_to_notify)
+        if first_run:
+            print(f"初回実行のため、検知された {len(new_items_to_notify)} 件をDB登録のみ実行します。")
+            for item in new_items_to_notify:
+                save_notified_item(item['id'], item['title'], item['url'])
+        elif len(new_items_to_notify) > MAX_NOTIFY_LIMIT:
+            print(f"[WARN] 未通知件数が上限({MAX_NOTIFY_LIMIT}件)を超える {len(new_items_to_notify)} 件検知されました。")
+            print("大量通知防止のため、LINE送信をスキップし全件既読化処理（DB更新）のみ実行します。")
+            for item in new_items_to_notify:
+                save_notified_item(item['id'], item['title'], item['url'])
+        else:
+            print(f"新規アイテム {len(new_items_to_notify)} 件をLINEに通知します。")
+            send_line_flex_messages(new_items_to_notify)
+            for item in new_items_to_notify:
+                save_notified_item(item['id'], item['title'], item['url'])
     else:
         print("通知対象の新しいアイテムはありませんでした。")
 

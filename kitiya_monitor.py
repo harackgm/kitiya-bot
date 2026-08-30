@@ -124,7 +124,6 @@ def send_line_flex_messages(items):
                 tag_text = "【吉や】 ✨新入荷"
                 btn_color = "#E61B23"
 
-            # size: micro を削除し、標準の大きなバブルサイズに変更
             bubble = {
                 "type": "bubble",
                 "hero": {
@@ -197,7 +196,12 @@ def send_line_flex_messages(items):
         }
         
         res = requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=flex_payload)
-        print(f"LINE送信結果: {res.status_code}")
+        
+        # 送信結果の判定ロジック追加（上限エラーの検知）
+        if res.status_code == 429 or (res.status_code != 200 and "limit" in res.text.lower()):
+            print("[ERROR] 今月分のLINE通知上限（200通）に到達しました。")
+        else:
+            print(f"LINE送信結果: {res.status_code}")
 
 # --- メイン監視処理 ---
 def scrape_kitiya():

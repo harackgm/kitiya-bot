@@ -1,9 +1,6 @@
 name: Kitiya Monitor Bot
 
 on:
-  schedule:
-    # 15分ごとに実行 (UTC基準)
-    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 jobs:

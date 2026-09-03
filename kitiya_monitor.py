@@ -279,7 +279,8 @@ def scrape_kitiya():
 
                 item_id = f"trout_{url}"
 
-                price_elem = parent.select_one(".price, .product_price, .item_price") if parent else None
+                # 修正ポイント: .c-item-list__price クラスを検索対象に追加して価格を正常に抽出
+                price_elem = parent.select_one(".c-item-list__price, .price, .product_price, .item_price") if parent else None
                 price = price_elem.get_text(strip=True) if price_elem else ""
 
                 img_tag = parent.select_one("img") if parent else None

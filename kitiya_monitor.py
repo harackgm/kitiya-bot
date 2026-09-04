@@ -227,19 +227,42 @@ def scrape_kitiya():
             blog_links = soup.find_all("a", href=re.compile(r"/apps/note/archives/\d+"))
             seen_urls = set()
             for a_tag in blog_links:
-                url = urljoin(BLOG_URL, a_tag.get("href")).rstrip("/")
+                original_href = a_tag.get("href")
+                url = urljoin(BLOG_URL, original_href).rstrip("/")
                 if url in seen_urls:
                     continue
                 seen_urls.add(url)
 
-                parent = a_tag.find_parent("article") or a_tag.find_parent("div") or a_tag
-                title = clean_title_text(a_tag.get_text(strip=True) or parent.get_text(strip=True))
+                # 修正ポイント: 同一URLを指すリンクをグループ化し、誤った親要素からの画像取得を防止
+                related_a_tags = soup.find_all("a", href=original_href)
+                title = ""
+                img_tag = None
+                
+                for rel_a in related_a_tags:
+                    if not title:
+                        text = clean_title_text(rel_a.get_text(strip=True))
+                        if text and len(text) >= 2:
+                            title = text
+                    if not img_tag:
+                        img = rel_a.find("img")
+                        if img:
+                            img_tag = img
+
+                # aタグ直下にない場合のフォールバック（<article>内のみ探索）
+                if not img_tag:
+                    parent = a_tag.find_parent("article")
+                    if parent:
+                        img_tag = parent.find("img")
+                
+                if not title or len(title) < 2:
+                    parent = a_tag.find_parent("article")
+                    if parent:
+                        title = clean_title_text(parent.get_text(strip=True))
 
                 if not title or len(title) < 2:
                     continue
 
                 item_id = f"blog_{url}"
-                img_tag = parent.select_one("img") if parent else None
                 image_url = clean_image_url(img_tag, BLOG_URL)
 
                 if not is_already_notified(item_id):
@@ -279,7 +302,6 @@ def scrape_kitiya():
 
                 item_id = f"trout_{url}"
 
-                # 修正ポイント: .c-item-list__price クラスを検索対象に追加して価格を正常に抽出
                 price_elem = parent.select_one(".c-item-list__price, .price, .product_price, .item_price") if parent else None
                 price = price_elem.get_text(strip=True) if price_elem else ""
 

@@ -13,6 +13,10 @@ TROUT_BASE_URL = "https://www.kitiya.jp/?mode=grp&gid=2590067&sort=n"
 DB_FILE = "kitiya_data.db"
 KITIYA_LOGO_URL = "https://www.kitiya.jp/apps/note/wp-content/uploads/2023/01/cropped-logo-192x192.png"
 
+# ▼ 通知上部に表示するロゴ画像のURL（GitHubのRaw URL）
+# ※もしブランチ名が「main」ではなく「master」の場合は、URL内の main を master に変更してください。
+HEADER_LOGO_URL = "https://raw.githubusercontent.com/harackgm/kitiya-bot/main/kichiyalogo.png"
+
 # 大量通知連投を防ぐ安全装置の上限値
 MAX_NOTIFY_LIMIT = 10
 
@@ -141,11 +145,20 @@ def send_line_flex_messages(items):
                     "layout": "vertical",
                     "contents": [
                         {
+                            "type": "image",
+                            "url": HEADER_LOGO_URL,
+                            "size": "xs",
+                            "aspectMode": "fit",
+                            "align": "start",
+                            "margin": "none"
+                        },
+                        {
                             "type": "text",
                             "text": tag_text,
                             "weight": "bold",
                             "size": "xs",
-                            "color": badge_color
+                            "color": badge_color,
+                            "margin": "sm"
                         },
                         {
                             "type": "text",

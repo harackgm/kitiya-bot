@@ -65,7 +65,10 @@ def clean_image_url(img_tag, base_url):
     if not img_tag:
         return ""
     src = img_tag.get("data-src") or img_tag.get("data-original") or img_tag.get("src") or ""
-    if not src or "blank.gif" in src or "spacer.gif" in src or "transparent" in src:
+    
+    # ダミー画像や作成中のNo Image（now_printing等）を除外するリスト
+    exclude_keywords = ["blank.gif", "spacer.gif", "transparent", "noimage", "now_printing", "no_image", "nowprinting"]
+    if not src or any(keyword in src.lower() for keyword in exclude_keywords):
         return ""
     
     full_url = urljoin(base_url, src)
@@ -233,7 +236,6 @@ def scrape_kitiya():
                     continue
                 seen_urls.add(url)
 
-                # 修正ポイント: 同一URLを指すリンクをグループ化し、誤った親要素からの画像取得を防止
                 related_a_tags = soup.find_all("a", href=original_href)
                 title = ""
                 img_tag = None
@@ -248,7 +250,6 @@ def scrape_kitiya():
                         if img:
                             img_tag = img
 
-                # aタグ直下にない場合のフォールバック（<article>内のみ探索）
                 if not img_tag:
                     parent = a_tag.find_parent("article")
                     if parent:
@@ -307,6 +308,10 @@ def scrape_kitiya():
 
                 img_tag = parent.select_one("img") if parent else None
                 image_url = clean_image_url(img_tag, TROUT_BASE_URL)
+
+                # ▼ページ作成中（No Imageなど）の商品の場合は通知を保留（DBに保存しない）
+                if not image_url:
+                    continue
 
                 if not is_already_notified(item_id):
                     new_items_to_notify.append({

@@ -133,6 +133,20 @@ def send_line_flex_messages(items):
 
             bubble = {
                 "type": "bubble",
+                "header": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingTop": "sm",
+                    "paddingBottom": "sm",
+                    "contents": [
+                        {
+                            "type": "image",
+                            "url": HEADER_LOGO_URL,
+                            "size": "xl",
+                            "aspectMode": "fit"
+                        }
+                    ]
+                },
                 "hero": {
                     "type": "image",
                     "url": image_url,
@@ -144,14 +158,6 @@ def send_line_flex_messages(items):
                     "type": "box",
                     "layout": "vertical",
                     "contents": [
-                        {
-                            "type": "image",
-                            "url": HEADER_LOGO_URL,
-                            "size": "xs",
-                            "aspectMode": "fit",
-                            "align": "start",
-                            "margin": "none"
-                        },
                         {
                             "type": "text",
                             "text": tag_text,

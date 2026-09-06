@@ -136,14 +136,14 @@ def send_line_flex_messages(items):
                 "header": {
                     "type": "box",
                     "layout": "vertical",
-                    "paddingTop": "sm",
-                    "paddingBottom": "sm",
+                    "paddingAll": "md",
                     "contents": [
                         {
                             "type": "image",
                             "url": HEADER_LOGO_URL,
-                            "size": "xl",
-                            "aspectMode": "fit"
+                            "size": "full",
+                            "aspectMode": "fit",
+                            "aspectRatio": "3:1"
                         }
                     ]
                 },
